@@ -1,0 +1,250 @@
+/* MAX31865 RTD SPI Example
+
+   This example code demonstrates how to communicate with MAX31865 RTD IC
+   using ESP32's SPI interface.
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <inttypes.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
+#include "driver/spi_master.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
+#include "math.h"
+
+// MAX31865 Register Map
+#define MAX31865_CONFIG_REG          0x00
+#define MAX31865_RTD_REG             0x01
+#define MAX31865_HIGH_FAULT_REG      0x03
+#define MAX31865_LOW_FAULT_REG       0x05
+#define MAX31865_FAULT_STATUS_REG    0x07
+
+#define MAX31865_REG_WRITE_OFFSET    0x80
+
+// Configuration Register Bits
+#define MAX31865_CONFIG_VBIAS_BIT            7
+#define MAX31865_CONFIG_CONVERSIONMODE_BIT   6
+#define MAX31865_CONFIG_1SHOT_BIT            5
+#define MAX31865_CONFIG_NWIRES_BIT           4
+#define MAX31865_CONFIG_FAULTDETECTION_BIT   2
+#define MAX31865_CONFIG_FAULTSTATUS_BIT      1
+#define MAX31865_CONFIG_MAINSFILTER_BIT      0
+
+// SPI Configuration
+#define PIN_NUM_MISO 26
+#define PIN_NUM_MOSI 25
+#define PIN_NUM_CLK  27
+#define PIN_NUM_CS1  32    // First MAX31865 CS pin
+#define PIN_NUM_CS2  33   // Second MAX31865 CS pin
+
+// RTD Constants
+#define RTD_A 3.9083e-3
+#define RTD_B -5.775e-7
+#define RTD_NOMINAL 100.0  // PT100 nominal resistance at 0°C
+
+static const char *TAG = "MAX31865";
+static spi_device_handle_t spi;
+
+// Function to read a register from MAX31865
+static esp_err_t max31865_read_reg(uint8_t reg, uint8_t *data, uint8_t cs_pin)
+{
+    esp_err_t ret;
+    spi_transaction_t t;
+    memset(&t, 0, sizeof(t));
+    
+    t.length = 0;  // No TX data
+    t.rxlength = 8;  // 8 bits for data
+    t.addr = reg & (MAX31865_REG_WRITE_OFFSET - 1);  // Clear write bit
+    t.flags = SPI_TRANS_USE_RXDATA;
+    
+    gpio_set_level(cs_pin, 0);  // Manual CS control
+    ret = spi_device_polling_transmit(spi, &t);
+    gpio_set_level(cs_pin, 1);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read register 0x%02x", reg);
+        return ret;
+    }
+    
+    *data = t.rx_data[0];
+    ESP_LOGI(TAG, "Read register 0x%02x: 0x%02x", reg, *data);
+    return ESP_OK;
+}
+
+// Function to write to a MAX31865 register
+static esp_err_t max31865_write_reg(uint8_t reg, uint8_t data, uint8_t cs_pin)
+{
+    esp_err_t ret;
+    spi_transaction_t t;
+    memset(&t, 0, sizeof(t));
+    
+    t.length = 8;  // 8 bits for data
+    t.addr = reg | MAX31865_REG_WRITE_OFFSET;  // Set write bit
+    t.flags = SPI_TRANS_USE_TXDATA;
+    t.tx_data[0] = data;
+    
+    gpio_set_level(cs_pin, 0);  // Manual CS control
+    ret = spi_device_polling_transmit(spi, &t);
+    gpio_set_level(cs_pin, 1);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write register 0x%02x", reg);
+        return ret;
+    }
+    
+    return ESP_OK;
+}
+
+// Function to initialize MAX31865
+static esp_err_t max31865_init(uint8_t cs_pin)
+{
+    esp_err_t ret;
+    
+    // Configure MAX31865
+    uint8_t config = (1 << MAX31865_CONFIG_VBIAS_BIT) |           // Enable bias voltage
+                    (1 << MAX31865_CONFIG_CONVERSIONMODE_BIT) |   // Enable auto conversion
+                    (1 << MAX31865_CONFIG_NWIRES_BIT);           // 3-wire RTD configuration
+    
+    ret = max31865_write_reg(MAX31865_CONFIG_REG, config, cs_pin);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // Clear fault status
+    ret = max31865_write_reg(MAX31865_CONFIG_REG, config | (1 << MAX31865_CONFIG_FAULTSTATUS_BIT), cs_pin);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    return ESP_OK;
+}
+
+// Function to read RTD resistance
+static esp_err_t max31865_read_rtd(uint16_t *rtd, uint8_t cs_pin)
+{
+    uint8_t rtd_bytes[2];
+    esp_err_t ret;
+
+    // Read RTD MSB and LSB registers
+    ret = max31865_read_reg(MAX31865_RTD_REG, &rtd_bytes[0], cs_pin);
+    if (ret != ESP_OK) return ret;
+    
+    ret = max31865_read_reg(MAX31865_RTD_REG + 1, &rtd_bytes[1], cs_pin);
+    if (ret != ESP_OK) return ret;
+
+    // Combine MSB and LSB
+    *rtd = ((uint16_t)rtd_bytes[0] << 8) | rtd_bytes[1];
+    *rtd >>= 1;  // Remove fault bit
+
+    return ESP_OK;
+}
+
+// Function to convert RTD resistance to temperature
+static float max31865_resistance_to_temperature(uint16_t rtd)
+{
+    float rtd_resistance = (float)rtd * RTD_NOMINAL / 32768.0;
+    float temp;
+    
+    // Callendar-Van Dusen equation
+    if (rtd_resistance >= RTD_NOMINAL) {
+        temp = (-RTD_A + sqrt(RTD_A * RTD_A - 4 * RTD_B * (1 - rtd_resistance / RTD_NOMINAL))) / (2 * RTD_B);
+    } else {
+        temp = (-RTD_A + sqrt(RTD_A * RTD_A - 4 * RTD_B * (1 - rtd_resistance / RTD_NOMINAL))) / (2 * RTD_B);
+    }
+    
+    return temp;
+}
+
+void app_main(void)
+{
+    esp_err_t ret;
+
+    // Configure CS pins
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << PIN_NUM_CS1) | (1ULL << PIN_NUM_CS2),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+    gpio_set_level(PIN_NUM_CS1, 1);  // CS1 inactive
+    gpio_set_level(PIN_NUM_CS2, 1);  // CS2 inactive
+
+    // SPI bus configuration
+    spi_bus_config_t buscfg = {
+        .miso_io_num = PIN_NUM_MISO,
+        .mosi_io_num = PIN_NUM_MOSI,
+        .sclk_io_num = PIN_NUM_CLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = 32,
+        .flags = SPICOMMON_BUSFLAG_MASTER | SPICOMMON_BUSFLAG_MISO | SPICOMMON_BUSFLAG_MOSI
+    };
+
+    // SPI device configuration
+    spi_device_interface_config_t devcfg = {
+        .clock_speed_hz = 1000000,  // 1 MHz
+        .mode = 1,                  // SPI mode 1 (CPOL=0, CPHA=1)
+        .spics_io_num = -1,         // Manual CS control
+        .queue_size = 1,
+        .flags = SPI_DEVICE_HALFDUPLEX,
+        .command_bits = 0,
+        .address_bits = 8,
+        .dummy_bits = 0
+    };
+
+    // Initialize SPI bus
+    ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    ESP_ERROR_CHECK(ret);
+
+    // Add device to the SPI bus
+    ret = spi_bus_add_device(SPI2_HOST, &devcfg, &spi);
+    ESP_ERROR_CHECK(ret);
+
+    // Initialize both MAX31865 ICs
+    ret = max31865_init(PIN_NUM_CS1);
+    ESP_ERROR_CHECK(ret);
+    
+    ret = max31865_init(PIN_NUM_CS2);
+    ESP_ERROR_CHECK(ret);
+
+    // Main loop
+    while (1) {
+        uint8_t config_value;
+        uint16_t rtd_value;
+        float temperature;
+        
+        // Read and print configuration register for first MAX31865
+        ret = max31865_read_reg(MAX31865_CONFIG_REG, &config_value, PIN_NUM_CS1);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "MAX31865 #1 Config Register: 0x%02x", config_value);
+        }
+        
+        // Read RTD value for first MAX31865
+        ret = max31865_read_rtd(&rtd_value, PIN_NUM_CS1);
+        if (ret == ESP_OK) {
+            temperature = max31865_resistance_to_temperature(rtd_value);
+            ESP_LOGI(TAG, "MAX31865 #1 RTD Value: %u, Temperature: %.2f °C", rtd_value, temperature);
+        }
+
+        // Read and print configuration register for second MAX31865
+        ret = max31865_read_reg(MAX31865_CONFIG_REG, &config_value, PIN_NUM_CS2);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "MAX31865 #2 Config Register: 0x%02x", config_value);
+        }
+        
+        // Read RTD value for second MAX31865
+        ret = max31865_read_rtd(&rtd_value, PIN_NUM_CS2);
+        if (ret == ESP_OK) {
+            temperature = max31865_resistance_to_temperature(rtd_value);
+            ESP_LOGI(TAG, "MAX31865 #2 RTD Value: %u, Temperature: %.2f °C", rtd_value, temperature);
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(1000));  // Read every second
+    }
+} 

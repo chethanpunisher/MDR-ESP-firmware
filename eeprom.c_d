@@ -1,0 +1,244 @@
+#include "eeprom.h"
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_log.h"
+#include "sdkconfig.h"
+
+// ESP-IDF uses 7-bit I2C address
+#define EEPROM_I2C_ADDR          (0x50U)
+
+// Calibration storage layout (variable length)
+// 0x0400: flag (0x01 = present)
+// 0x0401: count (N)
+// 0x0402.. : N floats
+#define CALIB_FLAG_ADDR          (0x0400U)
+#define CALIB_COUNT_ADDR         (CALIB_FLAG_ADDR + 1U)
+#define CALIB_DATA_ADDR          (CALIB_FLAG_ADDR + 2U)
+#define CALIB_DONE_IDENTIFIER    0x02
+
+// Conservative EEPROM page size for paged writes (adjust to your EEPROM)
+#define EEPROM_PAGE_SIZE         (16U)
+
+#define I2C_MASTER_TIMEOUT_MS    1000
+
+static const char *TAG = "eeprom";
+
+static i2c_master_dev_handle_t s_eeprom_dev = NULL;
+
+esp_err_t EEPROM_Init(i2c_master_bus_handle_t bus_handle)
+{
+    if (s_eeprom_dev != NULL) {
+        return ESP_OK;
+    }
+    i2c_device_config_t dev_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = EEPROM_I2C_ADDR,
+        .scl_speed_hz = CONFIG_I2C_MASTER_FREQUENCY,
+    };
+    return i2c_master_bus_add_device(bus_handle, &dev_config, &s_eeprom_dev);
+}
+
+esp_err_t EEPROM_Deinit(void)
+{
+    if (s_eeprom_dev != NULL) {
+        i2c_master_bus_rm_device(s_eeprom_dev);
+        s_eeprom_dev = NULL;
+    }
+    return ESP_OK;
+}
+
+esp_err_t EEPROM_ReadConfigReg(uint8_t *data, uint16_t len)
+{
+    uint8_t addr_bytes[2];
+    addr_bytes[0] = 0x80;   // Bit7=1 selects config register (device-specific)
+    addr_bytes[1] = 0x00;   // Don't care
+    return i2c_master_transmit_receive(s_eeprom_dev,
+                                       addr_bytes, 2,
+                                       data, len,
+                                       I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
+}
+
+esp_err_t EEPROM_WriteConfigReg(uint8_t wpr, uint8_t har, uint8_t sendHar)
+{
+    uint8_t buffer[4];
+    uint8_t len = 0;
+    buffer[len++] = 0x80;   // config space
+    buffer[len++] = 0x00;
+    buffer[len++] = wpr;
+    if (sendHar) {
+        buffer[len++] = har;
+    }
+    return i2c_master_transmit(s_eeprom_dev, buffer, len, I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
+}
+
+esp_err_t EEPROM_WriteData(uint8_t *addr, const uint8_t *data, uint16_t addr_len, uint16_t data_len)
+{
+    uint8_t buffer[2 + EEPROM_PAGE_SIZE];
+    (void)addr_len; // we only support 2-byte addressing here
+    buffer[0] = addr[0];
+    buffer[1] = addr[1];
+
+    // If data fits in one page, send directly; otherwise delegate to paged
+    if (data_len <= EEPROM_PAGE_SIZE)
+    {
+        memcpy(&buffer[2], data, data_len);
+        esp_err_t err = i2c_master_transmit(s_eeprom_dev, buffer, (size_t)(2 + data_len), I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
+        if (err == ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+        } else {
+            ESP_LOGE(TAG, "EEPROM_WriteData: TX fail %d", (int)err);
+        }
+        return err;
+    }
+
+    // Fallback to paged write
+    uint16_t base = ((uint16_t)addr[0] << 8) | addr[1];
+    uint16_t remaining = data_len;
+    const uint8_t *p = data;
+    while (remaining)
+    {
+        uint16_t page_off = base % EEPROM_PAGE_SIZE;
+        uint16_t space = EEPROM_PAGE_SIZE - page_off;
+        uint16_t chunk = (remaining < space) ? remaining : space;
+
+        buffer[0] = (uint8_t)((base >> 8) & 0xFF);
+        buffer[1] = (uint8_t)(base & 0xFF);
+        memcpy(&buffer[2], p, chunk);
+
+        esp_err_t err = i2c_master_transmit(s_eeprom_dev, buffer, (size_t)(2 + chunk), I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "EEPROM_WriteData (paged): TX fail %d", (int)err);
+            return err;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+
+        base += chunk; p += chunk; remaining -= chunk;
+    }
+    return ESP_OK;
+}
+
+esp_err_t EEPROM_ReadData(uint8_t *addr, uint8_t *data, uint16_t addr_len, uint16_t data_len)
+{
+    uint8_t buffer[2];
+    (void)addr_len; // 2-byte addressing
+    buffer[0] = addr[0];
+    buffer[1] = addr[1];
+    return i2c_master_transmit_receive(s_eeprom_dev,
+                                       buffer, 2,
+                                       data, data_len,
+                                       I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
+}
+
+// --- Calibration helpers ---
+
+static esp_err_t EEPROM_WriteBytesPaged(uint16_t start_addr, const uint8_t *data, uint16_t len)
+{
+    uint16_t remaining = len;
+    uint16_t current_addr = start_addr;
+    const uint8_t *current_ptr = data;
+    uint8_t buffer[2 + EEPROM_PAGE_SIZE];
+
+    while (remaining > 0)
+    {
+        uint16_t page_offset = current_addr % EEPROM_PAGE_SIZE;
+        uint16_t space_in_page = EEPROM_PAGE_SIZE - page_offset;
+        uint16_t chunk = (remaining < space_in_page) ? remaining : space_in_page;
+
+        buffer[0] = (uint8_t)((current_addr >> 8) & 0xFF);
+        buffer[1] = (uint8_t)(current_addr & 0xFF);
+        memcpy(&buffer[2], current_ptr, chunk);
+
+        esp_err_t err = i2c_master_transmit(s_eeprom_dev, buffer, (size_t)(2 + chunk), I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+
+        current_addr += chunk;
+        current_ptr  += chunk;
+        remaining    -= chunk;
+    }
+    return ESP_OK;
+}
+
+esp_err_t Calibration_Save(const float constants[6])
+{
+    // Back-compat fixed-6 API delegates to N=6 implementation
+    return Calibration_SaveN(constants, 6);
+}
+
+esp_err_t Calibration_Load(float constants[6], uint8_t *isValid)
+{
+    uint8_t n = 0;
+    return Calibration_LoadN(constants, 6, &n, isValid);
+}
+
+uint8_t EEPROM_CalibrationPresent(void)
+{
+    uint8_t flag_addr[2] = { (uint8_t)((CALIB_FLAG_ADDR >> 8) & 0xFF), (uint8_t)(CALIB_FLAG_ADDR & 0xFF) };
+    uint8_t flag_val = 0x00;
+    if (EEPROM_ReadData(flag_addr, &flag_val, 2, 1) != ESP_OK) {
+        return 0;
+    }
+    ESP_LOGD(TAG, "EEPROM_CalibrationPresent: flag_val = %d", flag_val);
+    return (flag_val == CALIB_DONE_IDENTIFIER) ? 1U : 0U;
+}
+
+esp_err_t Calibration_SaveN(const float *constants, uint8_t count)
+{
+    if (count == 0) {
+        // Clear flag to mark not calibrated
+        uint8_t flag_addr[2] = { (uint8_t)((CALIB_FLAG_ADDR >> 8) & 0xFF), (uint8_t)(CALIB_FLAG_ADDR & 0xFF) };
+        uint8_t zero = 0x00;
+        return EEPROM_WriteData(flag_addr, &zero, 2, 1);
+    }
+
+    // 1) Write count
+    uint8_t cnt_addr[2] = { (uint8_t)((CALIB_COUNT_ADDR >> 8) & 0xFF), (uint8_t)(CALIB_COUNT_ADDR & 0xFF) };
+    esp_err_t err = EEPROM_WriteData(cnt_addr, &count, 2, 1);
+    if (err != ESP_OK) { return err; }
+
+    // 2) Write floats payload
+    err = EEPROM_WriteBytesPaged(CALIB_DATA_ADDR, (const uint8_t *)constants, (uint16_t)((uint16_t)count * sizeof(float)));
+    if (err != ESP_OK) { return err; }
+
+    // 3) Set presence flag
+    uint8_t flag_addr[2] = { (uint8_t)((CALIB_FLAG_ADDR >> 8) & 0xFF), (uint8_t)(CALIB_FLAG_ADDR & 0xFF) };
+    uint8_t one = CALIB_DONE_IDENTIFIER;
+    return EEPROM_WriteData(flag_addr, &one, 2, 1);
+}
+
+esp_err_t Calibration_LoadN(float *constants, uint8_t maxCount, uint8_t *outCount, uint8_t *isValid)
+{
+    if (isValid) { *isValid = 0; }
+    if (outCount) { *outCount = 0; }
+
+    // 1) Read flag
+    uint8_t flag_addr[2] = { (uint8_t)((CALIB_FLAG_ADDR >> 8) & 0xFF), (uint8_t)(CALIB_FLAG_ADDR & 0xFF) };
+    uint8_t flag_val = 0x00;
+    esp_err_t err = EEPROM_ReadData(flag_addr, &flag_val, 2, 1);
+    if (err != ESP_OK) { return err; }
+    if (flag_val != CALIB_DONE_IDENTIFIER) { return ESP_OK; }
+
+    // 2) Read count
+    uint8_t cnt_addr[2] = { (uint8_t)((CALIB_COUNT_ADDR >> 8) & 0xFF), (uint8_t)(CALIB_COUNT_ADDR & 0xFF) };
+    uint8_t count = 0;
+    err = EEPROM_ReadData(cnt_addr, &count, 2, 1);
+    if (err != ESP_OK) { return err; }
+    if (count == 0) { return ESP_OK; }
+
+    // 3) Read payload (cap at maxCount)
+    uint8_t toRead = (count <= maxCount) ? count : maxCount;
+    uint16_t bytes = (uint16_t)((uint16_t)toRead * sizeof(float));
+    uint8_t data_addr[2] = { (uint8_t)((CALIB_DATA_ADDR >> 8) & 0xFF), (uint8_t)(CALIB_DATA_ADDR & 0xFF) };
+    err = EEPROM_ReadData(data_addr, (uint8_t *)constants, 2, bytes);
+    if (err != ESP_OK) { return err; }
+
+    if (outCount) { *outCount = count; }
+    if (isValid) { *isValid = 1; }
+    return ESP_OK;
+}
+
+

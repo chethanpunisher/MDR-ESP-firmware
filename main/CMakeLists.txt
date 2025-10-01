@@ -1,0 +1,22 @@
+idf_component_register(
+    SRCS
+        "../app/app_main.c"
+        "../app/src/comm_exec.c"
+        "../app/src/load_cell_svc.c"
+        "../app/src/RTD_temp_svc.c"
+        "../app/src/Relay_SSR_svc.c"
+        "../app/src/config.c"
+        "../app_drivers/src/max31865.c"
+        "../app_drivers/src/eeprom.c"
+        "../app_drivers/src/hx711.c"
+        "../BSP/src/balaji_infotech_machine_controller_v1.c"
+    INCLUDE_DIRS
+        "../app/inc"
+        "../app_drivers/inc"
+        "../BSP/inc"
+    REQUIRES
+        driver
+        freertos
+        esp_timer
+        log
+)
