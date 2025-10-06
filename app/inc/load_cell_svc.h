@@ -13,6 +13,7 @@ typedef struct {
     float current_weight;
     float tare_weight;
     float calibration_factor;
+    int32_t last_raw;
 } LoadCell_Handle_t;
 
 /* Exported functions */
@@ -20,5 +21,6 @@ void LoadCell_Init(void);
 float LoadCell_GetWeight(void);
 void LoadCell_Tare(void);
 void LoadCell_Calibrate(float known_weight);
+int32_t LoadCell_GetRaw(void);
 
 #endif /* LOAD_CELL_SVC_H */

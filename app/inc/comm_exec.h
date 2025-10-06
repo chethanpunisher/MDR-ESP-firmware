@@ -16,4 +16,13 @@ extern TaskHandle_t CommTaskHandle;
 void CommTask_Init(void);
 void CommTask_Start(void);
 
+/* JSON command format (examples):
+   {"cmd":"rtd_calib","dev":1,"known":100.0}
+   {"cmd":"set_temp","value":180}
+   {"cmd":"set_mode","value":"run|idle|stop|calib"}
+   {"cmd":"set_run_time","seconds":120}
+   {"cmd":"calibrate_mdr","weight":2.0,"lever":0.12}
+   {"cmd":"offset_mdr","ms":5000}
+*/
+
 #endif /* COMM_EXEC_H */

@@ -4,6 +4,7 @@
  #include "config.h"
  #include "max31865.h"
  #include "balaji_infotech_machine_controller_v1.h"
+#include "eeprom.h"
 
 
 /* Private variables */
@@ -77,14 +78,39 @@ void RTD_Temp_SetFactor(uint8_t dev_num, float factor)
     }
 }
 
+void RTD_Temp_LoadCalibration(void)
+{
+    float constants[6] = {0};
+    uint8_t valid = 0;
+    if (Calibration_Load(constants, &valid) == ESP_OK && valid) {
+        rtd_handle.known_temperature_dev1 = constants[0];
+        rtd_handle.known_temperature_dev2 = constants[1];
+        UART_Printf("Loaded RTD calibration offsets: d1=%.2f d2=%.2f\r\n", constants[0], constants[1]);
+    } else {
+        UART_Printf("No RTD calibration found in EEPROM\r\n");
+    }
+}
+
+void RTD_Temp_CalibrateAndSave(uint8_t dev_num, float known_temp)
+{
+    RTD_Temp_Calibrate(dev_num, known_temp);
+    float constants[6] = {0};
+    constants[0] = rtd_handle.known_temperature_dev1;
+    constants[1] = rtd_handle.known_temperature_dev2;
+    if (Calibration_Save(constants) == ESP_OK) {
+        UART_Printf("Saved RTD calibration offsets: d1=%.2f d2=%.2f\r\n", constants[0], constants[1]);
+    } else {
+        UART_Printf("Failed to save RTD calibration\r\n");
+    }
+}
+
 static void RTD_Task(void *argument)
 {
     MAX31865_Init(&rtd_handle.max31865_dev1, g_rtd_spi, RTD_CS1_GPIO, MAX31865_PT100, MAX31865_3WIRE, MAX31865_50HZ);
     MAX31865_Init(&rtd_handle.max31865_dev2, g_rtd_spi, RTD_CS2_GPIO, MAX31865_PT100, MAX31865_3WIRE, MAX31865_50HZ);
+    RTD_Temp_LoadCalibration();
     
-    // Initialize with default values
-    rtd_handle.known_temperature_dev1 = 0;
-    rtd_handle.known_temperature_dev2 = 0;
+    // Initialize default setpoint (calibration offsets are loaded above)
     rtd_handle.tempSetPoint = 180;
     
     // // Try to load saved values from flash
@@ -106,9 +132,7 @@ static void RTD_Task(void *argument)
     //     rtd_handle.known_temperature_dev1 = 0;
     //     rtd_handle.known_temperature_dev2 = 0;
     // }
-    rtd_handle.tempSetPoint = 180;
-    rtd_handle.known_temperature_dev1 = 0;
-    rtd_handle.known_temperature_dev2 = 0;
+    // Keep loaded calibration offsets; do not overwrite here
     
     /* Infinite loop */
     for(;;)

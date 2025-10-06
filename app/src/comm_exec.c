@@ -1,8 +1,8 @@
- #include "comm_exec.h"
- #include <stdarg.h>
- #include <stdio.h>
- #include <string.h>
- #include <stdint.h>  // For uint16_t
+#include "comm_exec.h"
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>  // For uint16_t
  #include "esp_log.h"
 #include "driver/uart.h"
 
@@ -13,6 +13,7 @@ TaskHandle_t CommTaskHandle;
 
 /* Private function prototypes */
 static void CommTask_Function(void *argument);
+static void ModeTask_Function(void *argument);
 // static void ParseCommand(char *cmd);
 
 /**
@@ -20,6 +21,8 @@ static void CommTask_Function(void *argument);
   * @param None
   * @retval None
   */
+static TaskHandle_t ModeTaskHandle;
+
 void CommTask_Init(void)
 {
   /* Configure UART0 for USB-UART bridge echo */
@@ -37,6 +40,7 @@ void CommTask_Init(void)
 
   /* Create the task */
   xTaskCreate(CommTask_Function, "CommTask", 4096, NULL, tskIDLE_PRIORITY+1, &CommTaskHandle);
+  xTaskCreate(ModeTask_Function, "ModeTask", 4096, NULL, tskIDLE_PRIORITY+1, &ModeTaskHandle);
 }
 
 /**
@@ -63,16 +67,333 @@ void CommTask_Start(void)
   * @param argument: Not used
   * @retval None
   */
+/* ---- Internal helpers for modularity ---- */
+
+#define COMM_UART                 UART_NUM_0
+#define COMM_UART_BAUD            115200
+#define COMM_RXBUF_SIZE           256
+#define COMM_LINEBUF_SIZE         256
+
+static void uart_init_defaults(void)
+{
+  const uart_config_t uart_config = {
+    .baud_rate = COMM_UART_BAUD,
+    .data_bits = UART_DATA_8_BITS,
+    .parity = UART_PARITY_DISABLE,
+    .stop_bits = UART_STOP_BITS_1,
+    .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    .source_clk = UART_SCLK_APB,
+  };
+  uart_driver_install(COMM_UART, 2048, 2048, 0, NULL, 0);
+  uart_param_config(COMM_UART, &uart_config);
+  uart_set_pin(COMM_UART, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+}
+
+static void reply_ok(const char *cmd)
+{
+  if (cmd) {
+    UART_Printf("{\"ok\":true,\"cmd\":\"%s\"}\r\n", cmd);
+  } else {
+    UART_Printf("{\"ok\":true}\r\n");
+  }
+}
+
+static void reply_err(const char *err)
+{
+  UART_Printf("{\"ok\":false,\"err\":\"%s\"}\r\n", err ? err : "error");
+}
+
+// --- Global runtime state for modes and MDR ---
+static float g_ADC_zero = 0.0f;          // offset
+static float g_K_T = 0.0f;               // Nm per count
+static uint32_t g_run_time_s = 60;       // default run duration (seconds)
+static uint32_t g_run_start_ms = 0;
+
+static void relays_all_off(void)
+{
+  Relay_SSR_SetRelay(1, OFF);
+  Relay_SSR_SetRelay(2, OFF);
+  Relay_SSR_SetRelay(3, OFF);
+  Relay_SSR_SetRelay(4, OFF);
+}
+
+static void relays_sequence_on(void)
+{
+  Relay_SSR_SetRelay(1, ON); vTaskDelay(pdMS_TO_TICKS(1000));
+  Relay_SSR_SetRelay(2, ON); vTaskDelay(pdMS_TO_TICKS(1000));
+  Relay_SSR_SetRelay(3, ON); vTaskDelay(pdMS_TO_TICKS(1000));
+  Relay_SSR_SetRelay(4, ON);
+}
+
+static void compute_offset_over_ms(uint32_t ms)
+{
+  const uint32_t end = (uint32_t)(xTaskGetTickCount()) + pdMS_TO_TICKS(ms);
+  double s = 0.0; uint32_t n = 0;
+  while ((uint32_t)xTaskGetTickCount() < end) {
+    int32_t raw = LoadCell_GetRaw();
+    s += (double)raw;
+    n++;
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  if (n > 0) g_ADC_zero = (float)(s / (double)n);
+}
+
+static void compute_KT_over_ms(uint32_t ms, float known_torque_nm)
+{
+  const uint32_t end = (uint32_t)(xTaskGetTickCount()) + pdMS_TO_TICKS(ms);
+  double vmin = 1e300, vmax = -1e300;
+  while ((uint32_t)xTaskGetTickCount() < end) {
+    int32_t raw = LoadCell_GetRaw();
+    double corr = (double)raw - (double)g_ADC_zero;
+    if (corr < vmin) vmin = corr;
+    if (corr > vmax) vmax = corr;
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  double amp = (vmax - vmin) / 2.0;
+  if (amp > 1e-6) {
+    g_K_T = (float)(known_torque_nm / amp);
+  }
+}
+
+/* Lightweight JSON helpers (simple extractors) */
+static int find_key_str(const char *json, const char *key, char *out, size_t out_sz)
+{
+  char pattern[32];
+  snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
+  const char *p = strstr(json, pattern);
+  if (!p) return 0;
+  p += strlen(pattern);
+  const char *q = strchr(p, '"');
+  if (!q || (size_t)(q - p) >= out_sz) return 0;
+  memcpy(out, p, (size_t)(q - p));
+  out[q - p] = '\0';
+  return 1;
+}
+
+static int find_key_num(const char *json, const char *key, double *val)
+{
+  char pattern[32];
+  snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+  const char *p = strstr(json, pattern);
+  if (!p) return 0;
+  p += strlen(pattern);
+  *val = atof(p);
+  return 1;
+}
+
+static void handle_line(const char *line)
+{
+  ESP_LOGI("UART", "Received %s", line);
+  char cmd[32];
+  if (!find_key_str(line, "cmd", cmd, sizeof(cmd))) { reply_err("bad_json"); return; }
+  ESP_LOGI("UART", "cmd: %s", cmd);
+  if (strcmp(cmd, "rtd_calib") == 0) {
+    double dev_d = 0, known_d = 0;
+    if (find_key_num(line, "dev", &dev_d) && find_key_num(line, "known", &known_d)) {
+      RTD_Temp_CalibrateAndSave((uint8_t)dev_d, (float)known_d);
+      reply_ok("rtd_calib");
+    } else {
+      reply_err("bad_args");
+    }
+        return;
+    }
+    
+  if (strcmp(cmd, "set_temp") == 0) {
+    double v = 0;
+    if (find_key_num(line, "value", &v)) {
+      RTD_Temp_SetTempSetPoint((float)v);
+      reply_ok("set_temp");
+    } else {
+      reply_err("bad_args");
+    }
+        return;
+    }
+    
+  if (strcmp(cmd, "get_temp") == 0) {
+    float t1 = RTD_Temp_GetTemperature(1);
+    float t2 = RTD_Temp_GetTemperature(2);
+    UART_Printf("{\"t1\":%.2f,\"t2\":%.2f}\r\n", t1, t2);
+        return;
+    }
+    
+  if (strcmp(cmd, "set_mode") == 0) {
+    char val[16];
+    ESP_LOGI("UART", "val: %s", val);
+    if (find_key_str(line, "value", val, sizeof(val))) {
+      if (strcmp(val, "powerup") == 0) { mode = 0; relays_all_off(); reply_ok("set_mode"); return; }
+      if (strcmp(val, "idle") == 0)    { mode = 0; relays_all_off(); reply_ok("set_mode"); return; }
+      if (strcmp(val, "run") == 0)     { mode = 1; triggerFlg = 1; g_run_start_ms = (uint32_t)(xTaskGetTickCount()); reply_ok("set_mode"); return; }
+      if (strcmp(val, "stop") == 0)    { mode = 0; relays_all_off(); reply_ok("set_mode"); return; }
+      if (strcmp(val, "calib") == 0)   { mode = 3; reply_ok("set_mode"); return; }
+    }
+    reply_err("bad_args");
+        return;
+    }
+    
+  if (strcmp(cmd, "set_run_time") == 0) {
+    double sec = 0;
+    if (find_key_num(line, "seconds", &sec) && sec > 0) {
+      g_run_time_s = (uint32_t)sec;
+      reply_ok("set_run_time");
+    } else {
+      reply_err("bad_args");
+    }
+        return;
+    }
+    
+  if (strcmp(cmd, "calibrate_mdr") == 0) {
+    double w=0, lever=0;
+    if (find_key_num(line, "weight", &w) && find_key_num(line, "lever", &lever) && w>0 && lever>0) {
+      // compute_offset_over_ms(5000);
+      relays_sequence_on();
+      float T_cal = (float)(w * 9.81 * lever);
+      compute_KT_over_ms(5000, T_cal);
+      relays_all_off();
+      UART_Printf("{\"ok\":true,\"cmd\":\"calibrate_mdr\",\"ADC_zero\":%.3f,\"K_T\":%.9f}\r\n", g_ADC_zero, g_K_T);
+    } else {
+      reply_err("bad_args");
+    }
+        return;
+    }
+
+  if (strcmp(cmd, "offset_mdr") == 0) {
+    double ms = 5000;
+    (void)find_key_num(line, "ms", &ms);
+    relays_all_off();
+    compute_offset_over_ms((uint32_t)ms);
+    UART_Printf("{\"ok\":true,\"cmd\":\"offset_mdr\",\"ADC_zero\":%.3f}\r\n", g_ADC_zero);
+    return;
+  }
+    
+  reply_err("unknown_cmd");
+}
+
+static void uart_poll_and_process_lines(void)
+{
+  uint8_t rxbuf[COMM_RXBUF_SIZE];
+  static char line[COMM_LINEBUF_SIZE];
+  static size_t line_len;
+
+  int len = uart_read_bytes(COMM_UART, rxbuf, sizeof(rxbuf), pdMS_TO_TICKS(20));
+  if (len <= 0) return;
+  ESP_LOGI("UART", "Received %d bytes", len);
+  ESP_LOGI("UART", "Received %s", rxbuf);
+  for (int i = 0; i < len; i++) {
+    char ch = (char)rxbuf[i];
+    if (ch == '\r') continue;
+    if (ch == '\n') {
+      line[line_len] = '\0';
+      if (line_len > 0) handle_line(line);
+      line_len = 0;
+    } else if (line_len < sizeof(line) - 1) {
+      line[line_len++] = ch;
+    }
+  }
+}
+
 static void CommTask_Function(void *argument)
 {
-  uint8_t rxbuf[256];
   for(;;) {
-    int len = uart_read_bytes(UART_NUM_0, rxbuf, sizeof(rxbuf), pdMS_TO_TICKS(20));
-    if (len > 0) {
-      /* Echo back */
-      uart_write_bytes(UART_NUM_0, (const char*)rxbuf, len);
-      /* Also log */
-      ESP_LOGI("UART", "RX %d bytes", len);
+    uart_poll_and_process_lines();
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+static void ModeTask_Function(void *argument)
+{
+  int last_mode = -1;
+  uint32_t last_broadcast = 0;
+  // Cycle amplitude tracking (per MDR reference)
+  const float cycle_freq_hz = 1.66f; // default
+  const uint32_t cycle_period_ms = (uint32_t)(1000.0f / cycle_freq_hz + 0.5f); // ≈602 ms
+  const TickType_t cycle_period_ticks = pdMS_TO_TICKS(cycle_period_ms);
+  uint32_t cycle_start_ms = 0;
+  double cycle_tmin = 1e300, cycle_tmax = -1e300;
+  int run_started = 0;
+  for (;;) {
+    int current_mode = mode; // from config.c
+
+    // On mode transition
+    if (current_mode != last_mode) {
+      if (current_mode == 0) { // idle/stop
+        relays_all_off();
+      } else if (current_mode == 1) { // run
+        // Prepare run: relays sequencing will be done just before starting timer
+        offTime = g_run_time_s; // keep legacy var in sync (seconds)
+        run_started = 0;
+        cycle_tmin = 1e300; cycle_tmax = -1e300;
+      } else if (current_mode == 3) { // calibration mode (idle here)
+        relays_all_off();
+        run_started = 0;
+      }
+      last_mode = current_mode;
     }
+
+    // State behaviors
+    if (current_mode == 0) { // idle mode
+      // Broadcast torque at ~10 Hz in idle mode
+      if ((uint32_t)(xTaskGetTickCount()) - last_broadcast >= pdMS_TO_TICKS(100)) {
+        last_broadcast = (uint32_t)(xTaskGetTickCount());
+        int32_t raw = LoadCell_GetRaw();
+        float torque = (g_K_T > 0.0f) ? (float)((double)raw - (double)g_ADC_zero) * g_K_T : 0.0f;
+        UART_Printf("{\"mode\":\"idle\",\"raw\":%ld,\"torque\":%.6f}\r\n", (long)raw, torque);
+      }
+    } else if (current_mode == 1) { // run mode
+      // If not started, sequence relays then start the timer
+      if (!run_started) {
+        relays_sequence_on();
+        g_run_start_ms = (uint32_t)xTaskGetTickCount();
+        cycle_start_ms = g_run_start_ms;
+        run_started = 1;
+      }
+
+      // Update remaining time (convert ticks to ms) only after start
+      TickType_t now_ticks = xTaskGetTickCount();
+      TickType_t elapsed_ticks = now_ticks - (TickType_t)g_run_start_ms;
+      uint32_t elapsed_ms = (uint32_t)elapsed_ticks * (uint32_t)portTICK_PERIOD_MS;
+      uint32_t elapsed_s = elapsed_ms / 1000U;
+      if (elapsed_s <= g_run_time_s) {
+        offTime = g_run_time_s - elapsed_s;
+      }
+
+      // Broadcast torque at ~10 Hz
+      if ((uint32_t)(xTaskGetTickCount()) - last_broadcast >= pdMS_TO_TICKS(100)) {
+        last_broadcast = (uint32_t)(xTaskGetTickCount());
+        int32_t raw = LoadCell_GetRaw();
+        float torque = (g_K_T > 0.0f) ? (float)((double)raw - (double)g_ADC_zero) * g_K_T : 0.0f;
+        UART_Printf("{\"mode\":\"run\",\"elapsed_s\":%u,\"raw\":%ld,\"torque\":%.6f}\r\n", (unsigned)elapsed_s, (long)raw, torque);
+        // Update cycle min/max for amplitude
+        double t = (double)torque;
+        if (t < cycle_tmin) cycle_tmin = t;
+        if (t > cycle_tmax) cycle_tmax = t;
+      }
+
+      // When a cycle elapses (tick-based), compute and print amplitude
+      TickType_t now_ticks2 = xTaskGetTickCount();
+      if ((now_ticks2 - (TickType_t)cycle_start_ms) >= cycle_period_ticks) {
+        double amp = (cycle_tmax - cycle_tmin) / 2.0;
+        // Print amplitude even if small, and add debug info
+        if(amp > 0.0) {
+           UART_Printf("{\"mode\":\"run\",\"cycle_amp\":%.6f,\"min\":%.6f,\"max\":%.6f}\r\n", 
+                   (float)amp, (float)cycle_tmin, (float)cycle_tmax);
+        }
+        else {
+          UART_Printf("{\"mode\":\"run\",\"cycle_amp\":1.0,\"min\":%.6f,\"max\":%.6f}\r\n", (float)cycle_tmin, (float)cycle_tmax);
+        }
+        // Advance to next cycle window
+        cycle_start_ms = (uint32_t)now_ticks2;
+        cycle_tmin = 1e300; cycle_tmax = -1e300;
+      }
+
+      // Stop condition
+      if (elapsed_s >= g_run_time_s) {
+        UART_Printf("{\"mode\":\"run\",\"status\":\"finished\"}\r\n");
+        mode = 0; // stop -> idle
+        relays_all_off();
+        run_started = 0;
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 }

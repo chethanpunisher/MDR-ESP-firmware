@@ -1,13 +1,9 @@
-/* Reference implementation restored */
 #include "eeprom.h"
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "sdkconfig.h"
-#ifndef CONFIG_I2C_MASTER_FREQUENCY
-#define CONFIG_I2C_MASTER_FREQUENCY 100000
-#endif
 
 // ESP-IDF uses 7-bit I2C address
 #define EEPROM_I2C_ADDR          (0x50U)
@@ -230,17 +226,26 @@ uint8_t EEPROM_CalibrationPresent(void)
 
 esp_err_t Calibration_SaveN(const float *constants, uint8_t count)
 {
-    // Build 64-byte blob: [0]=flag, [1]=count, [2..] floats (little endian)
-    uint8_t blob[64] = {0};
-    if (count > 14) { count = 14; } // 14 floats fit in remaining 62 bytes
-    blob[0] = CALIB_DONE_IDENTIFIER;
-    blob[1] = count;
-    memcpy(&blob[2], constants, (size_t)count * sizeof(float));
+    if (count == 0) {
+        // Clear flag to mark not calibrated
+        uint8_t flag_addr[2] = { (uint8_t)((CALIB_FLAG_ADDR >> 8) & 0xFF), (uint8_t)(CALIB_FLAG_ADDR & 0xFF) };
+        uint8_t zero = 0x00;
+        return EEPROM_WriteData(flag_addr, &zero, 2, 1);
+    }
 
-    // Split addresses like working example
-    uint8_t addr_first[2]  = { 0x00, 0x00 };
-    uint8_t addr_second[2] = { 0x3F, 0x00 };
-    return EEPROM_Write64Split(addr_first, addr_second, blob);
+    // 1) Write count
+    uint8_t cnt_addr[2] = { (uint8_t)((CALIB_COUNT_ADDR >> 8) & 0xFF), (uint8_t)(CALIB_COUNT_ADDR & 0xFF) };
+    esp_err_t err = EEPROM_WriteData(cnt_addr, &count, 2, 1);
+    if (err != ESP_OK) { return err; }
+
+    // 2) Write floats payload
+    err = EEPROM_WriteBytesPaged(CALIB_DATA_ADDR, (const uint8_t *)constants, (uint16_t)((uint16_t)count * sizeof(float)));
+    if (err != ESP_OK) { return err; }
+
+    // 3) Set presence flag
+    uint8_t flag_addr[2] = { (uint8_t)((CALIB_FLAG_ADDR >> 8) & 0xFF), (uint8_t)(CALIB_FLAG_ADDR & 0xFF) };
+    uint8_t one = CALIB_DONE_IDENTIFIER;
+    return EEPROM_WriteData(flag_addr, &one, 2, 1);
 }
 
 esp_err_t Calibration_LoadN(float *constants, uint8_t maxCount, uint8_t *outCount, uint8_t *isValid)
@@ -248,19 +253,30 @@ esp_err_t Calibration_LoadN(float *constants, uint8_t maxCount, uint8_t *outCoun
     if (isValid) { *isValid = 0; }
     if (outCount) { *outCount = 0; }
 
-    uint8_t blob[64] = {0};
-    uint8_t addr_first[2]  = { 0x00, 0x00 };
-    uint8_t addr_second[2] = { 0x3F, 0x00 };
-    esp_err_t err = EEPROM_Read64Split(addr_first, addr_second, blob);
+    // 1) Read flag
+    uint8_t flag_addr[2] = { (uint8_t)((CALIB_FLAG_ADDR >> 8) & 0xFF), (uint8_t)(CALIB_FLAG_ADDR & 0xFF) };
+    uint8_t flag_val = 0x00;
+    esp_err_t err = EEPROM_ReadData(flag_addr, &flag_val, 2, 1);
     if (err != ESP_OK) { return err; }
-    if (blob[0] != CALIB_DONE_IDENTIFIER) { return ESP_OK; }
-    uint8_t count = blob[1];
+    if (flag_val != CALIB_DONE_IDENTIFIER) { return ESP_OK; }
+
+    // 2) Read count
+    uint8_t cnt_addr[2] = { (uint8_t)((CALIB_COUNT_ADDR >> 8) & 0xFF), (uint8_t)(CALIB_COUNT_ADDR & 0xFF) };
+    uint8_t count = 0;
+    err = EEPROM_ReadData(cnt_addr, &count, 2, 1);
+    if (err != ESP_OK) { return err; }
     if (count == 0) { return ESP_OK; }
 
-    uint8_t toCopy = (count <= maxCount) ? count : maxCount;
-    memcpy(constants, &blob[2], (size_t)toCopy * sizeof(float));
+    // 3) Read payload (cap at maxCount)
+    uint8_t toRead = (count <= maxCount) ? count : maxCount;
+    uint16_t bytes = (uint16_t)((uint16_t)toRead * sizeof(float));
+    uint8_t data_addr[2] = { (uint8_t)((CALIB_DATA_ADDR >> 8) & 0xFF), (uint8_t)(CALIB_DATA_ADDR & 0xFF) };
+    err = EEPROM_ReadData(data_addr, (uint8_t *)constants, 2, bytes);
+    if (err != ESP_OK) { return err; }
+
     if (outCount) { *outCount = count; }
     if (isValid) { *isValid = 1; }
     return ESP_OK;
 }
+
 

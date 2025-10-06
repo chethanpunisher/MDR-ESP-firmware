@@ -11,19 +11,18 @@
 
  void app_main(void)
  {
-     BALAJI_Board_v1_Init();
+    BALAJI_Board_v1_Init();
 
-     // Initialize RTD/Relays
-     RTD_Temp_Init();
-     Relay_SSR_Init();
-     LoadCell_Init();
-
-     // Init I2C EEPROM (bus provided by BSP)
-     if (EEPROM_Init(g_i2c_bus) == ESP_OK) {
+    // Init I2C EEPROM (bus provided by BSP) BEFORE modules that load from it
+    if (EEPROM_Init(g_i2c_bus) == ESP_OK) {
          ESP_LOGI(TAG, "EEPROM initialized");
      } else {
          ESP_LOGW(TAG, "EEPROM init failed");
      }
+    // Initialize services
+    RTD_Temp_Init();
+    Relay_SSR_Init();
+    LoadCell_Init();
      CommTask_Init();
      while (1) {
          vTaskDelay(pdMS_TO_TICKS(1000));

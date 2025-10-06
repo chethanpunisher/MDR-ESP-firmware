@@ -59,6 +59,11 @@ float LoadCell_GetWeight(void)
     return loadCell.current_weight;
 }
 
+int32_t LoadCell_GetRaw(void)
+{
+    return loadCell.last_raw;
+}
+
 /**
   * @brief  Tare the load cell
   * @retval None
@@ -95,10 +100,11 @@ static void LoadCellTask_Function(void *argument)
     
     for(;;)
     {
-        /* Read weight every 1000ms */
-        loadCell.current_weight = hx711_weight(&loadCell.hx711, 1);
-        UART_Printf("mode%d : %.2f, temp1: %.2f, temp2: %.2f\r\n", mode, loadCell.current_weight, RTD_Temp_GetTemperature(1), RTD_Temp_GetTemperature(2));
-        // UART_Printf("loadcell started\r\n");
+        /* Read raw HX711 value and print */
+        int32_t raw = hx711_value(&loadCell.hx711);
+        loadCell.last_raw = raw;
+        // UART_Printf("mode%d : raw:%ld, temp1: %.2f, temp2: %.2f\r\n", mode, (long)raw, RTD_Temp_GetTemperature(1), RTD_Temp_GetTemperature(2));
+        // UART_Printf("{\"temp1\":%.2f,\"temp2\":%.2f}\r\n", RTD_Temp_GetTemperature(1), RTD_Temp_GetTemperature(2));
         vTaskDelay(pdMS_TO_TICKS(16));
     }
 }

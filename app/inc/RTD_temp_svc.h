@@ -23,4 +23,8 @@ void RTD_Temp_Calibrate(uint8_t dev_num, float known_temp);
 void RTD_Temp_SetTempSetPoint(float tempSetPoint);
 void RTD_Temp_SetFactor(uint8_t dev_num, float factor);
 
+/* EEPROM-backed calibration helpers */
+void RTD_Temp_LoadCalibration(void);
+void RTD_Temp_CalibrateAndSave(uint8_t dev_num, float known_temp);
+
 #endif /* RTD_TEMP_SVC_H */

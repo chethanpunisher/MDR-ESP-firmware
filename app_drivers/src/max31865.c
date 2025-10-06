@@ -43,13 +43,13 @@ static MAX31865_Status_t readRTD(MAX31865_Handle_t *hmax, uint16_t *rtd)
     (void)MAX31865_ClearFault(hmax);
     (void)MAX31865_EnableBias(hmax, 1);
     vTaskDelay(pdMS_TO_TICKS(10));
-
+    
     uint8_t config;
     (void)MAX31865_GetConfig(hmax, &config);
     config |= MAX31865_CONFIG_1SHOT;
     (void)MAX31865_SetConfig(hmax, config);
     vTaskDelay(pdMS_TO_TICKS(65));
-
+    
     uint8_t msb, lsb;
     if (max31865_read_byte(hmax, MAX31865_RTD_MSB_REG, &msb) != MAX31865_OK) return MAX31865_ERROR_SPI;
     if (max31865_read_byte(hmax, MAX31865_RTD_LSB_REG, &lsb) != MAX31865_OK) return MAX31865_ERROR_SPI;
@@ -232,4 +232,4 @@ MAX31865_Status_t MAX31865_ClearFault(MAX31865_Handle_t *hmax)
     }
     config |= MAX31865_CONFIG_FAULT_CLEAR;
     return MAX31865_WriteRegister(hmax, MAX31865_CONFIG_REG, config);
-}
+} 
