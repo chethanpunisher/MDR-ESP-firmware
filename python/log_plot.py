@@ -2,6 +2,7 @@ import argparse
 import csv
 import sys
 from datetime import datetime
+import os
 
 import matplotlib.pyplot as plt
 
@@ -24,6 +25,59 @@ def read_csv_manual(path):
     return ts, vals
 
 
+def read_excel_file(path):
+    """Read Excel file and return x-axis indices and fourth column values"""
+    try:
+        import pandas as pd
+        df = pd.read_excel(path)
+        
+        if len(df.columns) == 0:
+            raise ValueError("Excel file has no columns")
+        
+        if len(df.columns) < 4:
+            raise ValueError("Excel file must have at least 4 columns to plot 4th column")
+        
+        # Use fourth column only
+        col4 = df.columns[3]  # 4th column (0-indexed)
+        
+        # Remove rows with invalid data
+        df = df.dropna(subset=[col4])
+        
+        # Convert values to float, skip non-numeric values
+        vals = []
+        x_indices = []
+        
+        for i, val in enumerate(df[col4]):
+            try:
+                float_val = float(val)
+                vals.append(float_val)
+                x_indices.append(i)
+            except (ValueError, TypeError):
+                continue
+        
+        if not vals:
+            raise ValueError("No valid numeric data found in fourth column")
+        
+        return x_indices, vals
+        
+    except ImportError:
+        raise ImportError("pandas and openpyxl are required to read Excel files. Install with: pip install pandas openpyxl")
+    except Exception as e:
+        raise Exception(f"Error reading Excel file: {str(e)}")
+
+
+def detect_file_format(file_path):
+    """Detect if file is CSV or Excel based on extension"""
+    _, ext = os.path.splitext(file_path.lower())
+    if ext in ['.xlsx', '.xls']:
+        return 'excel'
+    elif ext == '.csv':
+        return 'csv'
+    else:
+        # Default to CSV if extension is unknown
+        return 'csv'
+
+
 def moving_average(values, window):
     if window <= 1:
         return values
@@ -40,41 +94,72 @@ def moving_average(values, window):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Plot loadcell raw_value from CSV")
-    p.add_argument("--file", default="loadcell_log.csv", help="CSV file path")
+    p = argparse.ArgumentParser(description="Plot loadcell raw_value from CSV or Excel file")
+    p.add_argument("--file", default="loadcell_log.csv", help="CSV or Excel file path")
     p.add_argument("--save", default=None, help="Save figure to path instead of showing")
     p.add_argument("--ma", type=int, default=1, help="Moving average window (samples)")
     args = p.parse_args()
 
+    # Detect file format
+    file_format = detect_file_format(args.file)
+    
     try:
-        import pandas as pd  # optional
-        df = pd.read_csv(args.file)
-        if "timestamp_iso" not in df.columns or "raw_value" not in df.columns:
-            print("CSV must have columns: timestamp_iso, raw_value", file=sys.stderr)
-            sys.exit(1)
-        df["timestamp_iso"] = pd.to_datetime(df["timestamp_iso"], errors="coerce")
-        df = df.dropna(subset=["timestamp_iso", "raw_value"])  # clean
-        y = df["raw_value"].astype(float).tolist()
-        if args.ma > 1:
-            y = moving_average(y, args.ma)
-        x = df["timestamp_iso"].tolist()
-    except Exception:
-        # Fallback without pandas
-        x, y = read_csv_manual(args.file)
+        if file_format == 'excel':
+            # Read Excel file - returns x, y (4th column only)
+            x, y = read_excel_file(args.file)
+            if args.ma > 1:
+                y = moving_average(y, args.ma)
+        else:
+            # Try pandas first for CSV
+            try:
+                import pandas as pd
+                df = pd.read_csv(args.file)
+                if "timestamp_iso" not in df.columns or "raw_value" not in df.columns:
+                    print("CSV must have columns: timestamp_iso, raw_value", file=sys.stderr)
+                    sys.exit(1)
+                df["timestamp_iso"] = pd.to_datetime(df["timestamp_iso"], errors="coerce")
+                df = df.dropna(subset=["timestamp_iso", "raw_value"])  # clean
+                y = df["raw_value"].astype(float).tolist()
+                if args.ma > 1:
+                    y = moving_average(y, args.ma)
+                x = df["timestamp_iso"].tolist()
+            except Exception:
+                # Fallback without pandas
+                x, y = read_csv_manual(args.file)
+        
         if not x:
             print("No data to plot.", file=sys.stderr)
             sys.exit(1)
         if args.ma > 1:
             y = moving_average(y, args.ma)
+            
+    except Exception as e:
+        print(f"Error reading file: {str(e)}", file=sys.stderr)
+        sys.exit(1)
 
     plt.figure(figsize=(10, 5))
-    plt.plot(x, y, label="raw_value")
-    if args.ma > 1:
-        plt.title(f"Loadcell raw_value (MA={args.ma})")
+    
+    # Plot data based on file format
+    if file_format == 'excel':
+        # Plot 4th column only
+        plt.plot(x, y, label="Column 4", color='red', linewidth=1.5)
+        
+        if args.ma > 1:
+            plt.title(f"Excel Data - Column 4 (MA={args.ma})")
+        else:
+            plt.title("Excel Data - Column 4")
+        plt.xlabel("Data Point Index")
     else:
-        plt.title("Loadcell raw_value")
-    plt.xlabel("Time")
-    plt.ylabel("Raw Value")
+        # Plot single column for CSV
+        plt.plot(x, y, label="Data", color='blue', linewidth=1.5)
+        
+        if args.ma > 1:
+            plt.title(f"Loadcell Data (MA={args.ma})")
+        else:
+            plt.title("Loadcell Data")
+        plt.xlabel("Time")
+    
+    plt.ylabel("Value")
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()

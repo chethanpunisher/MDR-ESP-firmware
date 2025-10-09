@@ -18,11 +18,14 @@ void CommTask_Start(void);
 
 /* JSON command format (examples):
    {"cmd":"rtd_calib","dev":1,"known":100.0}
-   {"cmd":"set_temp","value":180}
+   {"cmd":"set_temp","value":180}  // Sets temperature for both RTDs
+   {"cmd":"set_temp_rtd","dev":1,"temp":180}  // Sets temperature for individual RTD (dev: 1-2)
    {"cmd":"set_mode","value":"run|idle|stop|calib"}
    {"cmd":"set_run_time","seconds":120}
    {"cmd":"calibrate_mdr","weight":2.0,"lever":0.12}
    {"cmd":"offset_mdr","ms":5000}
+   {"cmd":"set_relay","relay":1,"state":1}  // relay: 1-4, state: 0=OFF, 1=ON
+   {"cmd":"get_relays"}  // Returns current state of all 4 relays
 */
 
 #endif /* COMM_EXEC_H */

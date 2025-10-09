@@ -13,7 +13,9 @@ typedef struct {
     float current_temperature_dev2;
     float known_temperature_dev1;
     float known_temperature_dev2;
-    float tempSetPoint;
+    float tempSetPoint;           // Global setpoint (legacy)
+    float tempSetPoint_dev1;      // Individual setpoint for device 1
+    float tempSetPoint_dev2;      // Individual setpoint for device 2
 } RTD_Temp_Handle_t;
 
 /* Exported functions */
@@ -21,6 +23,7 @@ void RTD_Temp_Init(void);
 float RTD_Temp_GetTemperature(uint8_t dev_num);
 void RTD_Temp_Calibrate(uint8_t dev_num, float known_temp);
 void RTD_Temp_SetTempSetPoint(float tempSetPoint);
+void RTD_Temp_SetTempSetPointIndividual(uint8_t dev_num, float tempSetPoint);
 void RTD_Temp_SetFactor(uint8_t dev_num, float factor);
 
 /* EEPROM-backed calibration helpers */

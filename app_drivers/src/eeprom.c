@@ -264,3 +264,91 @@ esp_err_t Calibration_LoadN(float *constants, uint8_t maxCount, uint8_t *outCoun
     return ESP_OK;
 }
 
+// --- Standardized calibration data functions ---
+
+esp_err_t EEPROM_SaveAllCalibrationData(const eeprom_calibration_data_t *data)
+{
+    // Convert struct to byte array for 64-split write
+    uint8_t blob[64] = {0};
+    blob[0] = CALIB_DONE_IDENTIFIER;
+    blob[1] = 8; // 8 floats in the structure
+    
+    // Copy the struct data (8 floats = 32 bytes)
+    memcpy(&blob[2], data, sizeof(eeprom_calibration_data_t));
+    
+    // Use the working 64-split method
+    uint8_t addr_first[2]  = { 0x00, 0x00 };
+    uint8_t addr_second[2] = { 0x3F, 0x00 };
+    return EEPROM_Write64Split(addr_first, addr_second, blob);
+}
+
+esp_err_t EEPROM_LoadAllCalibrationData(eeprom_calibration_data_t *data, uint8_t *isValid)
+{
+    if (isValid) { *isValid = 0; }
+    if (!data) { return ESP_ERR_INVALID_ARG; }
+
+    uint8_t blob[64] = {0};
+    uint8_t addr_first[2]  = { 0x00, 0x00 };
+    uint8_t addr_second[2] = { 0x3F, 0x00 };
+    esp_err_t err = EEPROM_Read64Split(addr_first, addr_second, blob);
+    if (err != ESP_OK) { return err; }
+    
+    // Check if calibration data is present
+    if (blob[0] != CALIB_DONE_IDENTIFIER) { return ESP_OK; }
+    uint8_t count = blob[1];
+    if (count != 8) { return ESP_OK; } // Expect exactly 8 floats
+    
+    // Copy the data back to struct
+    memcpy(data, &blob[2], sizeof(eeprom_calibration_data_t));
+    if (isValid) { *isValid = 1; }
+    return ESP_OK;
+}
+
+esp_err_t EEPROM_SaveRTDCalibration(float offset_dev1, float offset_dev2)
+{
+    eeprom_calibration_data_t data = {0};
+    uint8_t isValid = 0;
+    
+    // Load existing data first
+    EEPROM_LoadAllCalibrationData(&data, &isValid);
+    
+    // Update RTD calibration fields
+    data.rtd_offset_dev1 = offset_dev1;
+    data.rtd_offset_dev2 = offset_dev2;
+    
+    // Save updated data
+    return EEPROM_SaveAllCalibrationData(&data);
+}
+
+esp_err_t EEPROM_SaveRTDTemperatureSetpoints(float setpoint_dev1, float setpoint_dev2)
+{
+    eeprom_calibration_data_t data = {0};
+    uint8_t isValid = 0;
+    
+    // Load existing data first
+    EEPROM_LoadAllCalibrationData(&data, &isValid);
+    
+    // Update RTD temperature setpoint fields
+    data.rtd_temp_setpoint_dev1 = setpoint_dev1;
+    data.rtd_temp_setpoint_dev2 = setpoint_dev2;
+    
+    // Save updated data
+    return EEPROM_SaveAllCalibrationData(&data);
+}
+
+esp_err_t EEPROM_SaveMDRCalibration(float adc_zero, float k_t)
+{
+    eeprom_calibration_data_t data = {0};
+    uint8_t isValid = 0;
+    
+    // Load existing data first
+    EEPROM_LoadAllCalibrationData(&data, &isValid);
+    
+    // Update MDR calibration fields
+    data.mdr_adc_zero = adc_zero;
+    data.mdr_k_t = k_t;
+    
+    // Save updated data
+    return EEPROM_SaveAllCalibrationData(&data);
+}
+

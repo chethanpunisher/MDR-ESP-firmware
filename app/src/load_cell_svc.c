@@ -104,7 +104,7 @@ static void LoadCellTask_Function(void *argument)
         int32_t raw = hx711_value(&loadCell.hx711);
         loadCell.last_raw = raw;
         // UART_Printf("mode%d : raw:%ld, temp1: %.2f, temp2: %.2f\r\n", mode, (long)raw, RTD_Temp_GetTemperature(1), RTD_Temp_GetTemperature(2));
-        // UART_Printf("{\"temp1\":%.2f,\"temp2\":%.2f}\r\n", RTD_Temp_GetTemperature(1), RTD_Temp_GetTemperature(2));
+        UART_Printf("{\"temp1\":%.2f,\"temp2\":%.2f}\r\n", RTD_Temp_GetTemperature(1), RTD_Temp_GetTemperature(2));
         vTaskDelay(pdMS_TO_TICKS(16));
     }
 }

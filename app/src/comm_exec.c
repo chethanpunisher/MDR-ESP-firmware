@@ -3,11 +3,18 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>  // For uint16_t
- #include "esp_log.h"
+#include "esp_log.h"
 #include "driver/uart.h"
+#include "eeprom.h"
 
 /* Private variables */
 TaskHandle_t CommTaskHandle;
+
+// --- Global runtime state for modes and MDR ---
+static float g_ADC_zero = 0.0f;          // offset
+static float g_K_T = 0.0f;               // Nm per count
+static uint32_t g_run_time_s = 60;       // default run duration (seconds)
+static uint32_t g_run_start_ms = 0;
 
 // Command parsing disabled on ESP32 build for now
 
@@ -37,6 +44,17 @@ void CommTask_Init(void)
   uart_driver_install(UART_NUM_0, 2048, 2048, 0, NULL, 0);
   uart_param_config(UART_NUM_0, &uart_config);
   uart_set_pin(UART_NUM_0, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+
+  /* Load MDR calibration data from EEPROM */
+  eeprom_calibration_data_t data = {0};
+  uint8_t valid = 0;
+  if (EEPROM_LoadAllCalibrationData(&data, &valid) == ESP_OK && valid) {
+    g_ADC_zero = data.mdr_adc_zero;
+    g_K_T = data.mdr_k_t;
+    UART_Printf("Loaded MDR calibration: ADC_zero=%.3f, K_T=%.9f\r\n", g_ADC_zero, g_K_T);
+  } else {
+    UART_Printf("No MDR calibration found in EEPROM\r\n");
+  }
 
   /* Create the task */
   xTaskCreate(CommTask_Function, "CommTask", 4096, NULL, tskIDLE_PRIORITY+1, &CommTaskHandle);
@@ -102,12 +120,6 @@ static void reply_err(const char *err)
 {
   UART_Printf("{\"ok\":false,\"err\":\"%s\"}\r\n", err ? err : "error");
 }
-
-// --- Global runtime state for modes and MDR ---
-static float g_ADC_zero = 0.0f;          // offset
-static float g_K_T = 0.0f;               // Nm per count
-static uint32_t g_run_time_s = 60;       // default run duration (seconds)
-static uint32_t g_run_start_ms = 0;
 
 static void relays_all_off(void)
 {
@@ -208,6 +220,24 @@ static void handle_line(const char *line)
     }
         return;
     }
+
+  if (strcmp(cmd, "set_temp_rtd") == 0) {
+    double dev = 0, temp = 0;
+    if (find_key_num(line, "dev", &dev) && find_key_num(line, "temp", &temp)) {
+      int device = (int)dev;
+      
+      // Validate device number (1-2)
+      if (device >= 1 && device <= 2) {
+        RTD_Temp_SetTempSetPointIndividual((uint8_t)device, (float)temp);
+        UART_Printf("{\"ok\":true,\"cmd\":\"set_temp_rtd\",\"dev\":%d,\"temp\":%.2f}\r\n", device, temp);
+      } else {
+        reply_err("invalid_device");
+      }
+    } else {
+      reply_err("bad_args");
+    }
+    return;
+  }
     
   if (strcmp(cmd, "get_temp") == 0) {
     float t1 = RTD_Temp_GetTemperature(1);
@@ -244,11 +274,19 @@ static void handle_line(const char *line)
   if (strcmp(cmd, "calibrate_mdr") == 0) {
     double w=0, lever=0;
     if (find_key_num(line, "weight", &w) && find_key_num(line, "lever", &lever) && w>0 && lever>0) {
-      // compute_offset_over_ms(5000);
+      compute_offset_over_ms(60000);
       relays_sequence_on();
       float T_cal = (float)(w * 9.81 * lever);
-      compute_KT_over_ms(5000, T_cal);
+      compute_KT_over_ms(60000, T_cal);
       relays_all_off();
+      
+      // Save MDR calibration to EEPROM
+      if (EEPROM_SaveMDRCalibration(g_ADC_zero, g_K_T) == ESP_OK) {
+        UART_Printf("Saved MDR calibration to EEPROM\r\n");
+      } else {
+        UART_Printf("Failed to save MDR calibration to EEPROM\r\n");
+      }
+      
       UART_Printf("{\"ok\":true,\"cmd\":\"calibrate_mdr\",\"ADC_zero\":%.3f,\"K_T\":%.9f}\r\n", g_ADC_zero, g_K_T);
     } else {
       reply_err("bad_args");
@@ -261,7 +299,44 @@ static void handle_line(const char *line)
     (void)find_key_num(line, "ms", &ms);
     relays_all_off();
     compute_offset_over_ms((uint32_t)ms);
+    
+    // Save MDR offset to EEPROM
+    if (EEPROM_SaveMDRCalibration(g_ADC_zero, g_K_T) == ESP_OK) {
+      UART_Printf("Saved MDR offset to EEPROM\r\n");
+    } else {
+      UART_Printf("Failed to save MDR offset to EEPROM\r\n");
+    }
+    
     UART_Printf("{\"ok\":true,\"cmd\":\"offset_mdr\",\"ADC_zero\":%.3f}\r\n", g_ADC_zero);
+    return;
+  }
+
+  if (strcmp(cmd, "set_relay") == 0) {
+    double relay_num = 0, state = 0;
+    if (find_key_num(line, "relay", &relay_num) && find_key_num(line, "state", &state)) {
+      int relay = (int)relay_num;
+      int relay_state = (int)state;
+      
+      // Validate relay number (1-4) and state (0-1)
+      if (relay >= 1 && relay <= 4 && (relay_state == 0 || relay_state == 1)) {
+        Relay_SSR_SetRelay((uint8_t)relay, (uint8_t)relay_state);
+        UART_Printf("{\"ok\":true,\"cmd\":\"set_relay\",\"relay\":%d,\"state\":%d}\r\n", relay, relay_state);
+      } else {
+        reply_err("invalid_relay_or_state");
+      }
+    } else {
+      reply_err("bad_args");
+    }
+    return;
+  }
+
+  if (strcmp(cmd, "get_relays") == 0) {
+    uint8_t relay1 = Relay_SSR_GetRelayState(1);
+    uint8_t relay2 = Relay_SSR_GetRelayState(2);
+    uint8_t relay3 = Relay_SSR_GetRelayState(3);
+    uint8_t relay4 = Relay_SSR_GetRelayState(4);
+    UART_Printf("{\"ok\":true,\"cmd\":\"get_relays\",\"relay1\":%d,\"relay2\":%d,\"relay3\":%d,\"relay4\":%d}\r\n", 
+                relay1, relay2, relay3, relay4);
     return;
   }
     
@@ -310,6 +385,11 @@ static void ModeTask_Function(void *argument)
   uint32_t cycle_start_ms = 0;
   double cycle_tmin = 1e300, cycle_tmax = -1e300;
   int run_started = 0;
+  
+  // Moving average filter for amplitude (2-window)
+  double amp_filter_buffer[2] = {0.0, 0.0};
+  int amp_filter_index = 0;
+  int amp_filter_count = 0;
   for (;;) {
     int current_mode = mode; // from config.c
 
@@ -322,6 +402,9 @@ static void ModeTask_Function(void *argument)
         offTime = g_run_time_s; // keep legacy var in sync (seconds)
         run_started = 0;
         cycle_tmin = 1e300; cycle_tmax = -1e300;
+        // Reset moving average filter
+        amp_filter_buffer[0] = 0.0; amp_filter_buffer[1] = 0.0;
+        amp_filter_index = 0; amp_filter_count = 0;
       } else if (current_mode == 3) { // calibration mode (idle here)
         relays_all_off();
         run_started = 0;
@@ -357,7 +440,7 @@ static void ModeTask_Function(void *argument)
       }
 
       // Broadcast torque at ~10 Hz
-      if ((uint32_t)(xTaskGetTickCount()) - last_broadcast >= pdMS_TO_TICKS(100)) {
+      if ((uint32_t)(xTaskGetTickCount()) - last_broadcast >= pdMS_TO_TICKS(10)) {
         last_broadcast = (uint32_t)(xTaskGetTickCount());
         int32_t raw = LoadCell_GetRaw();
         float torque = (g_K_T > 0.0f) ? (float)((double)raw - (double)g_ADC_zero) * g_K_T : 0.0f;
@@ -372,14 +455,31 @@ static void ModeTask_Function(void *argument)
       TickType_t now_ticks2 = xTaskGetTickCount();
       if ((now_ticks2 - (TickType_t)cycle_start_ms) >= cycle_period_ticks) {
         double amp = (cycle_tmax - cycle_tmin) / 2.0;
-        // Print amplitude even if small, and add debug info
-        if(amp > 0.0) {
-           UART_Printf("{\"mode\":\"run\",\"cycle_amp\":%.6f,\"min\":%.6f,\"max\":%.6f}\r\n", 
-                   (float)amp, (float)cycle_tmin, (float)cycle_tmax);
+        
+        // Apply 2-window moving average filter
+        amp_filter_buffer[amp_filter_index] = amp;
+        amp_filter_index = (amp_filter_index + 1) % 2;
+        if (amp_filter_count < 2) amp_filter_count++;
+        
+        // Calculate filtered amplitude
+        double filtered_amp = 0.0;
+        if (amp_filter_count > 0) {
+          double sum = 0.0;
+          for (int i = 0; i < amp_filter_count; i++) {
+            sum += amp_filter_buffer[i];
+          }
+          filtered_amp = sum / (double)amp_filter_count;
+        }
+        
+        // Print filtered amplitude
+        if(filtered_amp > 0.0) {
+           UART_Printf("{\"mode\":\"run\",\"cycle_amp\":%.6f,\"cycle_amp_filtered\":%.6f,\"min\":%.6f,\"max\":%.6f}\r\n", 
+                   (float)amp, (float)filtered_amp, (float)cycle_tmin, (float)cycle_tmax);
         }
         else {
-          UART_Printf("{\"mode\":\"run\",\"cycle_amp\":1.0,\"min\":%.6f,\"max\":%.6f}\r\n", (float)cycle_tmin, (float)cycle_tmax);
+          UART_Printf("{\"mode\":\"run\",\"cycle_amp\":1.0,\"cycle_amp_filtered\":1.0,\"min\":%.6f,\"max\":%.6f}\r\n", (float)cycle_tmin, (float)cycle_tmax);
         }
+        
         // Advance to next cycle window
         cycle_start_ms = (uint32_t)now_ticks2;
         cycle_tmin = 1e300; cycle_tmax = -1e300;

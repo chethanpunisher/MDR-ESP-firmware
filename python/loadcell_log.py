@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 import os
 import re
 import sys
@@ -12,15 +13,22 @@ except ImportError:
     sys.exit(1)
 
 
-LINE_REGEX = re.compile(r"mode\d+\s*:\s*(?:raw:)?\s*(\d+)")
+# Updated regex to match the new JSON format
+LINE_REGEX = re.compile(r'I\s*\(\d+\)\s*UART:\s*(\{.*\})')
 
 
 def parse_value(line: str):
     match = LINE_REGEX.search(line)
     if match:
         try:
-            return int(match.group(1))
-        except ValueError:
+            # Extract JSON string from the match
+            json_str = match.group(1)
+            # Parse JSON
+            data = json.loads(json_str)
+            # Extract raw value
+            if 'raw' in data:
+                return int(data['raw'])
+        except (json.JSONDecodeError, ValueError, KeyError):
             return None
     return None
 
@@ -41,6 +49,7 @@ def main():
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate (default: 115200)")
     parser.add_argument("--out", default="loadcell_log.csv", help="Output CSV path")
     parser.add_argument("--print", dest="do_print", action="store_true", help="Print values to console")
+    parser.add_argument("--debug", action="store_true", help="Print debug information (all received lines)")
     args = parser.parse_args()
 
     ser = serial.Serial(args.port, args.baud, timeout=1)
@@ -62,6 +71,10 @@ def main():
             except Exception:
                 continue
 
+            # Debug: print all received lines if debug mode is enabled
+            if args.debug:
+                print(f"DEBUG: Received line: '{line}'")
+
             val = parse_value(line)
             if val is not None:
                 ts = datetime.utcnow().isoformat()
@@ -69,6 +82,10 @@ def main():
                 csv_file.flush()
                 if args.do_print:
                     print(f"{ts}, {val}")
+                if args.debug:
+                    print(f"DEBUG: Parsed value: {val}")
+            elif args.debug and line:  # Only show debug for non-empty lines
+                print(f"DEBUG: No match found for line: '{line}'")
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:

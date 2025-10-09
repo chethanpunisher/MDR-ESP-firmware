@@ -60,6 +60,31 @@ void RTD_Temp_Calibrate(uint8_t dev_num, float known_temp)
 void RTD_Temp_SetTempSetPoint(float tempSetPoint)
 {
     rtd_handle.tempSetPoint = tempSetPoint;
+    // Also set individual setpoints to maintain compatibility
+    rtd_handle.tempSetPoint_dev1 = tempSetPoint;
+    rtd_handle.tempSetPoint_dev2 = tempSetPoint;
+    
+    // Save to EEPROM
+    EEPROM_SaveRTDTemperatureSetpoints(tempSetPoint, tempSetPoint);
+}
+
+void RTD_Temp_SetTempSetPointIndividual(uint8_t dev_num, float tempSetPoint)
+{
+    if(dev_num == 1)
+    {
+        rtd_handle.tempSetPoint_dev1 = tempSetPoint;
+    }
+    else if(dev_num == 2)
+    {
+        rtd_handle.tempSetPoint_dev2 = tempSetPoint;
+    }
+    else
+    {
+        return;
+    }
+    
+    // Save both setpoints to EEPROM
+    EEPROM_SaveRTDTemperatureSetpoints(rtd_handle.tempSetPoint_dev1, rtd_handle.tempSetPoint_dev2);
 }
 
 void RTD_Temp_SetFactor(uint8_t dev_num, float factor)
@@ -80,12 +105,24 @@ void RTD_Temp_SetFactor(uint8_t dev_num, float factor)
 
 void RTD_Temp_LoadCalibration(void)
 {
-    float constants[6] = {0};
+    eeprom_calibration_data_t data = {0};
     uint8_t valid = 0;
-    if (Calibration_Load(constants, &valid) == ESP_OK && valid) {
-        rtd_handle.known_temperature_dev1 = constants[0];
-        rtd_handle.known_temperature_dev2 = constants[1];
-        UART_Printf("Loaded RTD calibration offsets: d1=%.2f d2=%.2f\r\n", constants[0], constants[1]);
+    if (EEPROM_LoadAllCalibrationData(&data, &valid) == ESP_OK && valid) {
+        // Load RTD calibration offsets
+        rtd_handle.known_temperature_dev1 = data.rtd_offset_dev1;
+        rtd_handle.known_temperature_dev2 = data.rtd_offset_dev2;
+        
+        // Load RTD temperature setpoints
+        rtd_handle.tempSetPoint_dev1 = data.rtd_temp_setpoint_dev1;
+        rtd_handle.tempSetPoint_dev2 = data.rtd_temp_setpoint_dev2;
+        
+        // Update global setpoint to match individual ones
+        rtd_handle.tempSetPoint = (data.rtd_temp_setpoint_dev1 + data.rtd_temp_setpoint_dev2) / 2.0f;
+        
+        UART_Printf("Loaded RTD calibration offsets: d1=%.2f d2=%.2f\r\n", 
+                    data.rtd_offset_dev1, data.rtd_offset_dev2);
+        UART_Printf("Loaded RTD temperature setpoints: d1=%.2f d2=%.2f\r\n", 
+                    data.rtd_temp_setpoint_dev1, data.rtd_temp_setpoint_dev2);
     } else {
         UART_Printf("No RTD calibration found in EEPROM\r\n");
     }
@@ -94,11 +131,11 @@ void RTD_Temp_LoadCalibration(void)
 void RTD_Temp_CalibrateAndSave(uint8_t dev_num, float known_temp)
 {
     RTD_Temp_Calibrate(dev_num, known_temp);
-    float constants[6] = {0};
-    constants[0] = rtd_handle.known_temperature_dev1;
-    constants[1] = rtd_handle.known_temperature_dev2;
-    if (Calibration_Save(constants) == ESP_OK) {
-        UART_Printf("Saved RTD calibration offsets: d1=%.2f d2=%.2f\r\n", constants[0], constants[1]);
+    
+    // Save RTD calibration using new standardized function
+    if (EEPROM_SaveRTDCalibration(rtd_handle.known_temperature_dev1, rtd_handle.known_temperature_dev2) == ESP_OK) {
+        UART_Printf("Saved RTD calibration offsets: d1=%.2f d2=%.2f\r\n", 
+                    rtd_handle.known_temperature_dev1, rtd_handle.known_temperature_dev2);
     } else {
         UART_Printf("Failed to save RTD calibration\r\n");
     }
@@ -110,8 +147,10 @@ static void RTD_Task(void *argument)
     MAX31865_Init(&rtd_handle.max31865_dev2, g_rtd_spi, RTD_CS2_GPIO, MAX31865_PT100, MAX31865_3WIRE, MAX31865_50HZ);
     RTD_Temp_LoadCalibration();
     
-    // Initialize default setpoint (calibration offsets are loaded above)
-    rtd_handle.tempSetPoint = 180;
+    // Initialize default setpoints (calibration offsets are loaded above)
+    // rtd_handle.tempSetPoint = 180;
+    // rtd_handle.tempSetPoint_dev1 = 180;
+    // rtd_handle.tempSetPoint_dev2 = 180;
     
     // // Try to load saved values from flash
     // Temp_Data_t tempData;
@@ -141,7 +180,7 @@ static void RTD_Task(void *argument)
         MAX31865_ReadTemperature(&rtd_handle.max31865_dev1, &rtd_handle.current_temperature_dev1);
         MAX31865_ReadTemperature(&rtd_handle.max31865_dev2, &rtd_handle.current_temperature_dev2);
 
-        if((RTD_Temp_GetTemperature(1) >= rtd_handle.tempSetPoint) || (RTD_Temp_GetTemperature(1) <= 0))
+        if((RTD_Temp_GetTemperature(1) >= rtd_handle.tempSetPoint_dev1) || (RTD_Temp_GetTemperature(1) <= 0))
         {
             Relay_SSR_SetSSR(1, SSR_OFF);
         }
@@ -150,7 +189,7 @@ static void RTD_Task(void *argument)
             Relay_SSR_SetSSR(1, SSR_ON);
         }
 
-        if((RTD_Temp_GetTemperature(2) >= rtd_handle.tempSetPoint) || (RTD_Temp_GetTemperature(2) <= 0))
+        if((RTD_Temp_GetTemperature(2) >= rtd_handle.tempSetPoint_dev2) || (RTD_Temp_GetTemperature(2) <= 0))
         {
             Relay_SSR_SetSSR(2, SSR_OFF);
         }
