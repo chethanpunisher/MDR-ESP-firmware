@@ -4,7 +4,7 @@
 #include <stdarg.h>
 
 uint8_t mode = 0;
-uint32_t offTime = 0;
+uint32_t offTime = 60; // Default to 60 seconds
 uint8_t triggerFlg = 0;
 
 void UART_Printf(const char *format, ...)

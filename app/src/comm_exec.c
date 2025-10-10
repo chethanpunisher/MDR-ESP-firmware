@@ -264,6 +264,8 @@ static void handle_line(const char *line)
     double sec = 0;
     if (find_key_num(line, "seconds", &sec) && sec > 0) {
       g_run_time_s = (uint32_t)sec;
+      UART_Printf("set_run_time: %u seconds\r\n", (uint32_t)sec);
+      offTime = (uint32_t)sec; // Also update legacy variable for compatibility
       reply_ok("set_run_time");
     } else {
       reply_err("bad_args");
@@ -390,6 +392,17 @@ static void ModeTask_Function(void *argument)
   double amp_filter_buffer[2] = {0.0, 0.0};
   int amp_filter_index = 0;
   int amp_filter_count = 0;
+  
+  // Amplitude tracking for idle mode
+  const uint32_t idle_cycle_period_ms = (uint32_t)(1000.0f / cycle_freq_hz + 0.5f); // Same as run mode: ≈602 ms
+  const TickType_t idle_cycle_period_ticks = pdMS_TO_TICKS(idle_cycle_period_ms);
+  uint32_t idle_cycle_start_ms = 0;
+  double idle_tmin = 1e300, idle_tmax = -1e300;
+  
+  // Moving average filter for idle mode amplitude (2-window)
+  double idle_amp_filter_buffer[2] = {0.0, 0.0};
+  int idle_amp_filter_index = 0;
+  int idle_amp_filter_count = 0;
   for (;;) {
     int current_mode = mode; // from config.c
 
@@ -397,6 +410,11 @@ static void ModeTask_Function(void *argument)
     if (current_mode != last_mode) {
       if (current_mode == 0) { // idle/stop
         relays_all_off();
+        // Reset idle mode amplitude tracking
+        idle_cycle_start_ms = (uint32_t)xTaskGetTickCount();
+        idle_tmin = 1e300; idle_tmax = -1e300;
+        idle_amp_filter_buffer[0] = 0.0; idle_amp_filter_buffer[1] = 0.0;
+        idle_amp_filter_index = 0; idle_amp_filter_count = 0;
       } else if (current_mode == 1) { // run
         // Prepare run: relays sequencing will be done just before starting timer
         offTime = g_run_time_s; // keep legacy var in sync (seconds)
@@ -415,11 +433,51 @@ static void ModeTask_Function(void *argument)
     // State behaviors
     if (current_mode == 0) { // idle mode
       // Broadcast torque at ~10 Hz in idle mode
-      if ((uint32_t)(xTaskGetTickCount()) - last_broadcast >= pdMS_TO_TICKS(100)) {
+      if ((uint32_t)(xTaskGetTickCount()) - last_broadcast >= pdMS_TO_TICKS(10)) {
         last_broadcast = (uint32_t)(xTaskGetTickCount());
         int32_t raw = LoadCell_GetRaw();
         float torque = (g_K_T > 0.0f) ? (float)((double)raw - (double)g_ADC_zero) * g_K_T : 0.0f;
+        
+        // Update idle mode amplitude tracking
+        double t = (double)torque;
+        if (t < idle_tmin) idle_tmin = t;
+        if (t > idle_tmax) idle_tmax = t;
+        
         UART_Printf("{\"mode\":\"idle\",\"raw\":%ld,\"torque\":%.6f}\r\n", (long)raw, torque);
+      }
+      
+      // When idle cycle elapses, compute and print amplitude
+      TickType_t now_ticks_idle = xTaskGetTickCount();
+      if ((now_ticks_idle - (TickType_t)idle_cycle_start_ms) >= idle_cycle_period_ticks) {
+        double amp = (idle_tmax - idle_tmin) / 2.0;
+        
+        // Apply 2-window moving average filter
+        idle_amp_filter_buffer[idle_amp_filter_index] = amp;
+        idle_amp_filter_index = (idle_amp_filter_index + 1) % 2;
+        if (idle_amp_filter_count < 2) idle_amp_filter_count++;
+        
+        // Calculate filtered amplitude
+        double filtered_amp = 0.0;
+        if (idle_amp_filter_count > 0) {
+          double sum = 0.0;
+          for (int i = 0; i < idle_amp_filter_count; i++) {
+            sum += idle_amp_filter_buffer[i];
+          }
+          filtered_amp = sum / (double)idle_amp_filter_count;
+        }
+        
+        // Print filtered amplitude
+        if(filtered_amp > 0.0) {
+           UART_Printf("{\"mode\":\"idle\",\"cycle_amp\":%.6f,\"cycle_amp_filtered\":%.6f,\"min\":%.6f,\"max\":%.6f}\r\n", 
+                   (float)amp, (float)filtered_amp, (float)idle_tmin, (float)idle_tmax);
+        }
+        else {
+          UART_Printf("{\"mode\":\"idle\",\"cycle_amp\":1.0,\"cycle_amp_filtered\":1.0,\"min\":%.6f,\"max\":%.6f}\r\n", (float)idle_tmin, (float)idle_tmax);
+        }
+        
+        // Advance to next cycle window
+        idle_cycle_start_ms = (uint32_t)now_ticks_idle;
+        idle_tmin = 1e300; idle_tmax = -1e300;
       }
     } else if (current_mode == 1) { // run mode
       // If not started, sequence relays then start the timer
