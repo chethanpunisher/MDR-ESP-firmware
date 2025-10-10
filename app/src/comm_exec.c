@@ -253,7 +253,7 @@ static void handle_line(const char *line)
       if (strcmp(val, "powerup") == 0) { mode = 0; relays_all_off(); reply_ok("set_mode"); return; }
       if (strcmp(val, "idle") == 0)    { mode = 0; relays_all_off(); reply_ok("set_mode"); return; }
       if (strcmp(val, "run") == 0)     { mode = 1; triggerFlg = 1; g_run_start_ms = (uint32_t)(xTaskGetTickCount()); reply_ok("set_mode"); return; }
-      if (strcmp(val, "stop") == 0)    { mode = 0; relays_all_off(); reply_ok("set_mode"); return; }
+      if (strcmp(val, "stop") == 0)    { mode = 0; relays_all_off(); UART_Printf("{\"mode\":\"run\",\"status\":\"finished\"}\r\n"); return; }
       if (strcmp(val, "calib") == 0)   { mode = 3; reply_ok("set_mode"); return; }
     }
     reply_err("bad_args");
@@ -388,8 +388,8 @@ static void ModeTask_Function(void *argument)
   double cycle_tmin = 1e300, cycle_tmax = -1e300;
   int run_started = 0;
   
-  // Moving average filter for amplitude (2-window)
-  double amp_filter_buffer[2] = {0.0, 0.0};
+  // Moving average filter for amplitude (5-window)
+  double amp_filter_buffer[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
   int amp_filter_index = 0;
   int amp_filter_count = 0;
   
@@ -421,7 +421,7 @@ static void ModeTask_Function(void *argument)
         run_started = 0;
         cycle_tmin = 1e300; cycle_tmax = -1e300;
         // Reset moving average filter
-        amp_filter_buffer[0] = 0.0; amp_filter_buffer[1] = 0.0;
+        amp_filter_buffer[0] = 0.0; amp_filter_buffer[1] = 0.0; amp_filter_buffer[2] = 0.0; amp_filter_buffer[3] = 0.0; amp_filter_buffer[4] = 0.0;
         amp_filter_index = 0; amp_filter_count = 0;
       } else if (current_mode == 3) { // calibration mode (idle here)
         relays_all_off();
@@ -514,10 +514,10 @@ static void ModeTask_Function(void *argument)
       if ((now_ticks2 - (TickType_t)cycle_start_ms) >= cycle_period_ticks) {
         double amp = (cycle_tmax - cycle_tmin) / 2.0;
         
-        // Apply 2-window moving average filter
+        // Apply 5-window moving average filter
         amp_filter_buffer[amp_filter_index] = amp;
-        amp_filter_index = (amp_filter_index + 1) % 2;
-        if (amp_filter_count < 2) amp_filter_count++;
+        amp_filter_index = (amp_filter_index + 1) % 5;
+        if (amp_filter_count < 5) amp_filter_count++;
         
         // Calculate filtered amplitude
         double filtered_amp = 0.0;
