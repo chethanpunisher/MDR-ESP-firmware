@@ -26,7 +26,7 @@ def read_csv_manual(path):
 
 
 def read_excel_file(path):
-    """Read Excel file and return x-axis indices and fourth column values"""
+    """Read Excel file and return x-axis indices and first column values"""
     try:
         import pandas as pd
         df = pd.read_excel(path)
@@ -34,20 +34,17 @@ def read_excel_file(path):
         if len(df.columns) == 0:
             raise ValueError("Excel file has no columns")
         
-        if len(df.columns) < 4:
-            raise ValueError("Excel file must have at least 4 columns to plot 4th column")
-        
-        # Use fourth column only
-        col4 = df.columns[3]  # 4th column (0-indexed)
+        # Use first column only
+        col1 = df.columns[0]  # 1st column (0-indexed)
         
         # Remove rows with invalid data
-        df = df.dropna(subset=[col4])
+        df = df.dropna(subset=[col1])
         
         # Convert values to float, skip non-numeric values
         vals = []
         x_indices = []
         
-        for i, val in enumerate(df[col4]):
+        for i, val in enumerate(df[col1]):
             try:
                 float_val = float(val)
                 vals.append(float_val)
@@ -56,7 +53,7 @@ def read_excel_file(path):
                 continue
         
         if not vals:
-            raise ValueError("No valid numeric data found in fourth column")
+            raise ValueError("No valid numeric data found in first column")
         
         return x_indices, vals
         
@@ -105,7 +102,7 @@ def main():
     
     try:
         if file_format == 'excel':
-            # Read Excel file - returns x, y (4th column only)
+            # Read Excel file - returns x, y (1st column only)
             x, y = read_excel_file(args.file)
             if args.ma > 1:
                 y = moving_average(y, args.ma)
@@ -141,13 +138,13 @@ def main():
     
     # Plot data based on file format
     if file_format == 'excel':
-        # Plot 4th column only
-        plt.plot(x, y, label="Column 4", color='red', linewidth=1.5)
+        # Plot 1st column only
+        plt.plot(x, y, label="Column 1", color='red', linewidth=1.5)
         
         if args.ma > 1:
-            plt.title(f"Excel Data - Column 4 (MA={args.ma})")
+            plt.title(f"Excel Data - Column 1 (MA={args.ma})")
         else:
-            plt.title("Excel Data - Column 4")
+            plt.title("Excel Data - Column 1")
         plt.xlabel("Data Point Index")
     else:
         # Plot single column for CSV

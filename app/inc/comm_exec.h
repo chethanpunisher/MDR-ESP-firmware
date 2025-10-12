@@ -24,6 +24,7 @@ void CommTask_Start(void);
    {"cmd":"set_run_time","seconds":120}
    {"cmd":"calibrate_mdr","weight":2.0,"lever":0.12}
    {"cmd":"offset_mdr","ms":5000}
+   {"cmd":"tare_idle_amp"}  // Tares/offsets idle mode amplitude with current value
    {"cmd":"set_relay","relay":1,"state":1}  // relay: 1-4, state: 0=OFF, 1=ON
    {"cmd":"get_relays"}  // Returns current state of all 4 relays
 */

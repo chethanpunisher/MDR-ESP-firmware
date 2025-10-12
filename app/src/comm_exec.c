@@ -16,6 +16,9 @@ static float g_K_T = 0.0f;               // Nm per count
 static uint32_t g_run_time_s = 60;       // default run duration (seconds)
 static uint32_t g_run_start_ms = 0;
 
+// Global variable for idle amplitude tare request
+double g_idle_amp_tare_request = 0.0;
+
 // Command parsing disabled on ESP32 build for now
 
 /* Private function prototypes */
@@ -313,6 +316,15 @@ static void handle_line(const char *line)
     return;
   }
 
+  if (strcmp(cmd, "tare_idle_amp") == 0) {
+    // This command will be handled by setting a flag that the ModeTask will read
+    // We'll use a global variable to communicate between CommTask and ModeTask
+    extern double g_idle_amp_tare_request;
+    g_idle_amp_tare_request = 1.0; // Set flag to request tare
+    reply_ok("tare_idle_amp");
+    return;
+  }
+
   if (strcmp(cmd, "set_relay") == 0) {
     double relay_num = 0, state = 0;
     if (find_key_num(line, "relay", &relay_num) && find_key_num(line, "state", &state)) {
@@ -380,6 +392,7 @@ static void ModeTask_Function(void *argument)
 {
   int last_mode = -1;
   uint32_t last_broadcast = 0;
+  uint32_t last_print = 0;
   // Cycle amplitude tracking (per MDR reference)
   const float cycle_freq_hz = 1.66f; // default
   const uint32_t cycle_period_ms = (uint32_t)(1000.0f / cycle_freq_hz + 0.5f); // ≈602 ms
@@ -403,6 +416,9 @@ static void ModeTask_Function(void *argument)
   double idle_amp_filter_buffer[2] = {0.0, 0.0};
   int idle_amp_filter_index = 0;
   int idle_amp_filter_count = 0;
+  
+  // Idle mode amplitude offset/tare value
+  double idle_amp_offset = 0.0;
   for (;;) {
     int current_mode = mode; // from config.c
 
@@ -415,6 +431,7 @@ static void ModeTask_Function(void *argument)
         idle_tmin = 1e300; idle_tmax = -1e300;
         idle_amp_filter_buffer[0] = 0.0; idle_amp_filter_buffer[1] = 0.0;
         idle_amp_filter_index = 0; idle_amp_filter_count = 0;
+        // Note: idle_amp_offset is preserved across mode transitions
       } else if (current_mode == 1) { // run
         // Prepare run: relays sequencing will be done just before starting timer
         offTime = g_run_time_s; // keep legacy var in sync (seconds)
@@ -432,7 +449,26 @@ static void ModeTask_Function(void *argument)
 
     // State behaviors
     if (current_mode == 0) { // idle mode
-      // Broadcast torque at ~10 Hz in idle mode
+      // Check for idle amplitude tare request
+      if (g_idle_amp_tare_request > 0.0) {
+        // Calculate current filtered amplitude
+        double current_amp = 0.0;
+        if (idle_amp_filter_count > 0) {
+          double sum = 0.0;
+          for (int i = 0; i < idle_amp_filter_count; i++) {
+            sum += idle_amp_filter_buffer[i];
+          }
+          current_amp = sum / (double)idle_amp_filter_count;
+        }
+        
+        // Set offset to current amplitude value
+        idle_amp_offset = current_amp;
+        g_idle_amp_tare_request = 0.0; // Clear request flag
+        
+        UART_Printf("{\"ok\":true,\"cmd\":\"tare_idle_amp\",\"offset\":%.6f}\r\n", (float)idle_amp_offset);
+      }
+      
+      // Broadcast torque at ~100 Hz in idle mode
       if ((uint32_t)(xTaskGetTickCount()) - last_broadcast >= pdMS_TO_TICKS(10)) {
         last_broadcast = (uint32_t)(xTaskGetTickCount());
         int32_t raw = LoadCell_GetRaw();
@@ -442,8 +478,12 @@ static void ModeTask_Function(void *argument)
         double t = (double)torque;
         if (t < idle_tmin) idle_tmin = t;
         if (t > idle_tmax) idle_tmax = t;
-        
-        UART_Printf("{\"mode\":\"idle\",\"raw\":%ld,\"torque\":%.6f}\r\n", (long)raw, torque);
+      }
+      
+      // Print idle mode data at 10Hz
+      if ((uint32_t)(xTaskGetTickCount()) - last_print >= pdMS_TO_TICKS(100)) {
+        last_print = (uint32_t)(xTaskGetTickCount());
+        UART_Printf("{\"mode\":\"idle\",\"raw\":%ld,\"torque\":%.6f}\r\n", (long)LoadCell_GetRaw(), (g_K_T > 0.0f) ? (float)((double)LoadCell_GetRaw() - (double)g_ADC_zero) * g_K_T : 0.0f);
       }
       
       // When idle cycle elapses, compute and print amplitude
@@ -466,13 +506,16 @@ static void ModeTask_Function(void *argument)
           filtered_amp = sum / (double)idle_amp_filter_count;
         }
         
-        // Print filtered amplitude
+        // Apply offset to filtered amplitude
+        double offset_amp = filtered_amp - idle_amp_offset;
+        
+        // Print filtered amplitude with offset applied
         if(filtered_amp > 0.0) {
-           UART_Printf("{\"mode\":\"idle\",\"cycle_amp\":%.6f,\"cycle_amp_filtered\":%.6f,\"min\":%.6f,\"max\":%.6f}\r\n", 
-                   (float)amp, (float)filtered_amp, (float)idle_tmin, (float)idle_tmax);
+           UART_Printf("{\"mode\":\"idle\",\"cycle_amp\":%.6f,\"cycle_amp_filtered\":%.6f,\"cycle_amp_offset\":%.6f,\"min\":%.6f,\"max\":%.6f}\r\n", 
+                   (float)amp, (float)offset_amp, (float)idle_amp_offset, (float)idle_tmin, (float)idle_tmax);
         }
         else {
-          UART_Printf("{\"mode\":\"idle\",\"cycle_amp\":1.0,\"cycle_amp_filtered\":1.0,\"min\":%.6f,\"max\":%.6f}\r\n", (float)idle_tmin, (float)idle_tmax);
+          UART_Printf("{\"mode\":\"idle\",\"cycle_amp\":1.0,\"cycle_amp_filtered\":1.0,\"cycle_amp_offset\":%.6f,\"min\":%.6f,\"max\":%.6f}\r\n", (float)idle_amp_offset, (float)idle_tmin, (float)idle_tmax);
         }
         
         // Advance to next cycle window
@@ -497,16 +540,21 @@ static void ModeTask_Function(void *argument)
         offTime = g_run_time_s - elapsed_s;
       }
 
-      // Broadcast torque at ~10 Hz
+      // Broadcast torque at ~100 Hz
       if ((uint32_t)(xTaskGetTickCount()) - last_broadcast >= pdMS_TO_TICKS(10)) {
         last_broadcast = (uint32_t)(xTaskGetTickCount());
         int32_t raw = LoadCell_GetRaw();
         float torque = (g_K_T > 0.0f) ? (float)((double)raw - (double)g_ADC_zero) * g_K_T : 0.0f;
-        UART_Printf("{\"mode\":\"run\",\"elapsed_s\":%u,\"raw\":%ld,\"torque\":%.6f}\r\n", (unsigned)elapsed_s, (long)raw, torque);
         // Update cycle min/max for amplitude
         double t = (double)torque;
         if (t < cycle_tmin) cycle_tmin = t;
         if (t > cycle_tmax) cycle_tmax = t;
+      }
+      
+      // Print run mode data at 10Hz
+      if ((uint32_t)(xTaskGetTickCount()) - last_print >= pdMS_TO_TICKS(10)) {
+        last_print = (uint32_t)(xTaskGetTickCount());
+        UART_Printf("{\"mode\":\"run\",\"elapsed_s\":%u,\"raw\":%ld,\"torque\":%.6f}\r\n", (unsigned)elapsed_s, (long)LoadCell_GetRaw(), (g_K_T > 0.0f) ? (float)((double)LoadCell_GetRaw() - (double)g_ADC_zero) * g_K_T : 0.0f);
       }
 
       // When a cycle elapses (tick-based), compute and print amplitude
@@ -532,7 +580,7 @@ static void ModeTask_Function(void *argument)
         // Print filtered amplitude
         if(filtered_amp > 0.0) {
            UART_Printf("{\"mode\":\"run\",\"cycle_amp\":%.6f,\"cycle_amp_filtered\":%.6f,\"min\":%.6f,\"max\":%.6f}\r\n", 
-                   (float)amp, (float)filtered_amp, (float)cycle_tmin, (float)cycle_tmax);
+                   (float)filtered_amp, (float)filtered_amp, (float)cycle_tmin, (float)cycle_tmax);
         }
         else {
           UART_Printf("{\"mode\":\"run\",\"cycle_amp\":1.0,\"cycle_amp_filtered\":1.0,\"min\":%.6f,\"max\":%.6f}\r\n", (float)cycle_tmin, (float)cycle_tmax);

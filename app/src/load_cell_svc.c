@@ -31,6 +31,14 @@ void LoadCell_Init(void)
     /* Set default calibration factor */
     loadCell.calibration_factor = 200.0f;
     
+    /* Initialize moving average filter */
+    loadCell.last_raw_filtered = 0;
+    loadCell.filter_index = 0;
+    loadCell.filter_count = 0;
+    for (int i = 0; i < 10; i++) {
+        loadCell.filter_buffer[i] = 0;
+    }
+    
     /* Power cycle HX711 before setting coefficient */
     // hx711_power_down(&loadCell.hx711);
     // HAL_Delay(10);
@@ -62,6 +70,11 @@ float LoadCell_GetWeight(void)
 int32_t LoadCell_GetRaw(void)
 {
     return loadCell.last_raw;
+}
+
+int32_t LoadCell_GetRawFiltered(void)
+{
+    return loadCell.last_raw_filtered;
 }
 
 /**
@@ -100,11 +113,23 @@ static void LoadCellTask_Function(void *argument)
     
     for(;;)
     {
-        /* Read raw HX711 value and print */
+        /* Read raw HX711 value */
         int32_t raw = hx711_value(&loadCell.hx711);
         loadCell.last_raw = raw;
-        // UART_Printf("mode%d : raw:%ld, temp1: %.2f, temp2: %.2f\r\n", mode, (long)raw, RTD_Temp_GetTemperature(1), RTD_Temp_GetTemperature(2));
-        UART_Printf("{\"temp1\":%.2f,\"temp2\":%.2f}\r\n", RTD_Temp_GetTemperature(1), RTD_Temp_GetTemperature(2));
+        
+        /* Apply 10-window moving average filter */
+        loadCell.filter_buffer[loadCell.filter_index] = raw;
+        loadCell.filter_index = (loadCell.filter_index + 1) % 10;
+        if (loadCell.filter_count < 10) loadCell.filter_count++;
+        
+        /* Calculate filtered value */
+        int64_t sum = 0;
+        for (int i = 0; i < loadCell.filter_count; i++) {
+            sum += loadCell.filter_buffer[i];
+        }
+        loadCell.last_raw_filtered = (int32_t)(sum / loadCell.filter_count);
+        
+        // UART_Printf("mode%d : raw:%ld, filtered:%ld\r\n", mode, (long)raw, (long)loadCell.last_raw_filtered);
         vTaskDelay(pdMS_TO_TICKS(16));
     }
 }

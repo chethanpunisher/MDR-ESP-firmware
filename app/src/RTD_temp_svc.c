@@ -180,6 +180,9 @@ static void RTD_Task(void *argument)
         MAX31865_ReadTemperature(&rtd_handle.max31865_dev1, &rtd_handle.current_temperature_dev1);
         MAX31865_ReadTemperature(&rtd_handle.max31865_dev2, &rtd_handle.current_temperature_dev2);
 
+        /* Print temperature values */
+        UART_Printf("{\"temp1\":%.2f,\"temp2\":%.2f}\r\n", RTD_Temp_GetTemperature(1), RTD_Temp_GetTemperature(2));
+
         if((RTD_Temp_GetTemperature(1) >= rtd_handle.tempSetPoint_dev1) || (RTD_Temp_GetTemperature(1) <= 0))
         {
             Relay_SSR_SetSSR(1, SSR_OFF);
@@ -199,6 +202,6 @@ static void RTD_Task(void *argument)
         }
         
         /* Wait for 1000ms */
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
