@@ -136,7 +136,7 @@ static void relays_sequence_on(void)
 {
   Relay_SSR_SetRelay(1, ON); vTaskDelay(pdMS_TO_TICKS(1000));
   Relay_SSR_SetRelay(2, ON); vTaskDelay(pdMS_TO_TICKS(1000));
-  Relay_SSR_SetRelay(3, ON); vTaskDelay(pdMS_TO_TICKS(1000));
+  Relay_SSR_SetRelay(3, ON); vTaskDelay(pdMS_TO_TICKS(10000));
   Relay_SSR_SetRelay(4, ON);
 }
 
@@ -145,7 +145,7 @@ static void compute_offset_over_ms(uint32_t ms)
   const uint32_t end = (uint32_t)(xTaskGetTickCount()) + pdMS_TO_TICKS(ms);
   double s = 0.0; uint32_t n = 0;
   while ((uint32_t)xTaskGetTickCount() < end) {
-    int32_t raw = LoadCell_GetRaw();
+    int32_t raw = LoadCell_GetRawFiltered();
     s += (double)raw;
     n++;
     vTaskDelay(pdMS_TO_TICKS(5));
@@ -158,7 +158,7 @@ static void compute_KT_over_ms(uint32_t ms, float known_torque_nm)
   const uint32_t end = (uint32_t)(xTaskGetTickCount()) + pdMS_TO_TICKS(ms);
   double vmin = 1e300, vmax = -1e300;
   while ((uint32_t)xTaskGetTickCount() < end) {
-    int32_t raw = LoadCell_GetRaw();
+    int32_t raw = LoadCell_GetRawFiltered();
     double corr = (double)raw - (double)g_ADC_zero;
     if (corr < vmin) vmin = corr;
     if (corr > vmax) vmax = corr;
@@ -279,11 +279,11 @@ static void handle_line(const char *line)
   if (strcmp(cmd, "calibrate_mdr") == 0) {
     double w=0, lever=0;
     if (find_key_num(line, "weight", &w) && find_key_num(line, "lever", &lever) && w>0 && lever>0) {
-      compute_offset_over_ms(60000);
-      relays_sequence_on();
+      // compute_offset_over_ms(60000);
+      // relays_sequence_on();
       float T_cal = (float)(w * 9.81 * lever);
       compute_KT_over_ms(60000, T_cal);
-      relays_all_off();
+      // relays_all_off();
       
       // Save MDR calibration to EEPROM
       if (EEPROM_SaveMDRCalibration(g_ADC_zero, g_K_T) == ESP_OK) {
@@ -302,7 +302,7 @@ static void handle_line(const char *line)
   if (strcmp(cmd, "offset_mdr") == 0) {
     double ms = 5000;
     (void)find_key_num(line, "ms", &ms);
-    relays_all_off();
+    // relays_all_off();
     compute_offset_over_ms((uint32_t)ms);
     
     // Save MDR offset to EEPROM
@@ -471,7 +471,7 @@ static void ModeTask_Function(void *argument)
       // Broadcast torque at ~100 Hz in idle mode
       if ((uint32_t)(xTaskGetTickCount()) - last_broadcast >= pdMS_TO_TICKS(10)) {
         last_broadcast = (uint32_t)(xTaskGetTickCount());
-        int32_t raw = LoadCell_GetRaw();
+        int32_t raw = LoadCell_GetRawFiltered();
         float torque = (g_K_T > 0.0f) ? (float)((double)raw - (double)g_ADC_zero) * g_K_T : 0.0f;
         
         // Update idle mode amplitude tracking
@@ -483,7 +483,7 @@ static void ModeTask_Function(void *argument)
       // Print idle mode data at 10Hz
       if ((uint32_t)(xTaskGetTickCount()) - last_print >= pdMS_TO_TICKS(100)) {
         last_print = (uint32_t)(xTaskGetTickCount());
-        UART_Printf("{\"mode\":\"idle\",\"raw\":%ld,\"torque\":%.6f}\r\n", (long)LoadCell_GetRaw(), (g_K_T > 0.0f) ? (float)((double)LoadCell_GetRaw() - (double)g_ADC_zero) * g_K_T : 0.0f);
+        UART_Printf("{\"mode\":\"idle\",\"raw\":%ld,\"torque\":%.6f}\r\n", (long)LoadCell_GetRawFiltered(), (g_K_T > 0.0f) ? (float)((double)LoadCell_GetRawFiltered() - (double)g_ADC_zero) * g_K_T : 0.0f);
       }
       
       // When idle cycle elapses, compute and print amplitude
@@ -543,7 +543,7 @@ static void ModeTask_Function(void *argument)
       // Broadcast torque at ~100 Hz
       if ((uint32_t)(xTaskGetTickCount()) - last_broadcast >= pdMS_TO_TICKS(10)) {
         last_broadcast = (uint32_t)(xTaskGetTickCount());
-        int32_t raw = LoadCell_GetRaw();
+        int32_t raw = LoadCell_GetRawFiltered();
         float torque = (g_K_T > 0.0f) ? (float)((double)raw - (double)g_ADC_zero) * g_K_T : 0.0f;
         // Update cycle min/max for amplitude
         double t = (double)torque;
@@ -554,7 +554,7 @@ static void ModeTask_Function(void *argument)
       // Print run mode data at 10Hz
       if ((uint32_t)(xTaskGetTickCount()) - last_print >= pdMS_TO_TICKS(10)) {
         last_print = (uint32_t)(xTaskGetTickCount());
-        UART_Printf("{\"mode\":\"run\",\"elapsed_s\":%u,\"raw\":%ld,\"torque\":%.6f}\r\n", (unsigned)elapsed_s, (long)LoadCell_GetRaw(), (g_K_T > 0.0f) ? (float)((double)LoadCell_GetRaw() - (double)g_ADC_zero) * g_K_T : 0.0f);
+        UART_Printf("{\"mode\":\"run\",\"elapsed_s\":%u,\"raw\":%ld,\"torque\":%.6f}\r\n", (unsigned)elapsed_s, (long)LoadCell_GetRawFiltered(), (g_K_T > 0.0f) ? (float)((double)LoadCell_GetRawFiltered() - (double)g_ADC_zero) * g_K_T : 0.0f);
       }
 
       // When a cycle elapses (tick-based), compute and print amplitude

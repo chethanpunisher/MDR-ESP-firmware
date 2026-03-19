@@ -183,7 +183,7 @@ static void RTD_Task(void *argument)
         /* Print temperature values */
         UART_Printf("{\"temp1\":%.2f,\"temp2\":%.2f}\r\n", RTD_Temp_GetTemperature(1), RTD_Temp_GetTemperature(2));
 
-        if((RTD_Temp_GetTemperature(1) >= rtd_handle.tempSetPoint_dev1) || (RTD_Temp_GetTemperature(1) <= 0))
+        if((RTD_Temp_GetTemperature(1) >= (rtd_handle.tempSetPoint_dev1 - 1)) || (RTD_Temp_GetTemperature(1) <= 0))
         {
             Relay_SSR_SetSSR(1, SSR_OFF);
         }
@@ -192,7 +192,7 @@ static void RTD_Task(void *argument)
             Relay_SSR_SetSSR(1, SSR_ON);
         }
 
-        if((RTD_Temp_GetTemperature(2) >= rtd_handle.tempSetPoint_dev2) || (RTD_Temp_GetTemperature(2) <= 0))
+        if((RTD_Temp_GetTemperature(2) >= (rtd_handle.tempSetPoint_dev2 - 1)) || (RTD_Temp_GetTemperature(2) <= 0))
         {
             Relay_SSR_SetSSR(2, SSR_OFF);
         }

@@ -35,7 +35,7 @@ void LoadCell_Init(void)
     loadCell.last_raw_filtered = 0;
     loadCell.filter_index = 0;
     loadCell.filter_count = 0;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 20; i++) {
         loadCell.filter_buffer[i] = 0;
     }
     
@@ -120,7 +120,7 @@ static void LoadCellTask_Function(void *argument)
         /* Apply 10-window moving average filter */
         loadCell.filter_buffer[loadCell.filter_index] = raw;
         loadCell.filter_index = (loadCell.filter_index + 1) % 10;
-        if (loadCell.filter_count < 10) loadCell.filter_count++;
+        if (loadCell.filter_count < 20) loadCell.filter_count++;
         
         /* Calculate filtered value */
         int64_t sum = 0;

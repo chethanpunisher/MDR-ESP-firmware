@@ -17,7 +17,7 @@ typedef struct {
     int32_t last_raw_filtered;
     
     // Moving average filter for raw values
-    int32_t filter_buffer[10];
+    int32_t filter_buffer[20];
     int filter_index;
     int filter_count;
 } LoadCell_Handle_t;
