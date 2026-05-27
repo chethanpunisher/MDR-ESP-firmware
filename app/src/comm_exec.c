@@ -349,11 +349,28 @@ static void handle_line(const char *line)
     uint8_t relay2 = Relay_SSR_GetRelayState(2);
     uint8_t relay3 = Relay_SSR_GetRelayState(3);
     uint8_t relay4 = Relay_SSR_GetRelayState(4);
-    UART_Printf("{\"ok\":true,\"cmd\":\"get_relays\",\"relay1\":%d,\"relay2\":%d,\"relay3\":%d,\"relay4\":%d}\r\n", 
+    UART_Printf("{\"ok\":true,\"cmd\":\"get_relays\",\"relay1\":%d,\"relay2\":%d,\"relay3\":%d,\"relay4\":%d}\r\n",
                 relay1, relay2, relay3, relay4);
     return;
   }
-    
+
+  if (strcmp(cmd, "set_rtd_factor") == 0) {
+    double dev = 0, factor = 0;
+    if (find_key_num(line, "dev", &dev) && find_key_num(line, "factor", &factor)) {
+      int device = (int)dev;
+      if (device >= 1 && device <= 2) {
+        RTD_Temp_SetFactorAndSave((uint8_t)device, (float)factor);
+        UART_Printf("{\"ok\":true,\"cmd\":\"set_rtd_factor\",\"dev\":%d,\"factor\":%.6f}\r\n",
+                    device, (float)factor);
+      } else {
+        reply_err("invalid_device");
+      }
+    } else {
+      reply_err("bad_args");
+    }
+    return;
+  }
+
   reply_err("unknown_cmd");
 }
 

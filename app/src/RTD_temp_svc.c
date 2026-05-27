@@ -128,6 +128,26 @@ void RTD_Temp_LoadCalibration(void)
     }
 }
 
+float RTD_Temp_GetFactor(uint8_t dev_num)
+{
+    if (dev_num == 1) return rtd_handle.known_temperature_dev1;
+    if (dev_num == 2) return rtd_handle.known_temperature_dev2;
+    return 0.0f;
+}
+
+void RTD_Temp_SetFactorAndSave(uint8_t dev_num, float factor)
+{
+    RTD_Temp_SetFactor(dev_num, factor);
+
+    // Persist both offsets so neither value is lost
+    if (EEPROM_SaveRTDCalibration(rtd_handle.known_temperature_dev1,
+                                   rtd_handle.known_temperature_dev2) == ESP_OK) {
+        UART_Printf("Saved RTD factor: dev%d=%.4f\r\n", dev_num, factor);
+    } else {
+        UART_Printf("Failed to save RTD factor to EEPROM\r\n");
+    }
+}
+
 void RTD_Temp_CalibrateAndSave(uint8_t dev_num, float known_temp)
 {
     RTD_Temp_Calibrate(dev_num, known_temp);

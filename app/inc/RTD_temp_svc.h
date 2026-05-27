@@ -30,4 +30,8 @@ void RTD_Temp_SetFactor(uint8_t dev_num, float factor);
 void RTD_Temp_LoadCalibration(void);
 void RTD_Temp_CalibrateAndSave(uint8_t dev_num, float known_temp);
 
+/* Direct factor get/set (override EEPROM-loaded value) */
+float RTD_Temp_GetFactor(uint8_t dev_num);
+void  RTD_Temp_SetFactorAndSave(uint8_t dev_num, float factor);
+
 #endif /* RTD_TEMP_SVC_H */
