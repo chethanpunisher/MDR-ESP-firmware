@@ -28,6 +28,7 @@ void CommTask_Start(void);
    {"cmd":"set_relay","relay":1,"state":1}  // relay: 1-4, state: 0=OFF, 1=ON
    {"cmd":"get_relays"}  // Returns current state of all 4 relays
    {"cmd":"set_rtd_factor","dev":1,"factor":41.79628}  // Overrides RTD calibration offset (dev: 1-2), saved to EEPROM
+   {"cmd":"set_mdr_calib","adc_zero":12345.678,"k_t":0.000123456}  // Overrides MDR ADC zero and/or K_T, saved to EEPROM
 */
 
 #endif /* COMM_EXEC_H */

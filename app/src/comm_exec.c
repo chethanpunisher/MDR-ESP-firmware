@@ -354,6 +354,26 @@ static void handle_line(const char *line)
     return;
   }
 
+  if (strcmp(cmd, "set_mdr_calib") == 0) {
+    double adc_zero = 0, k_t = 0;
+    int has_adc = find_key_num(line, "adc_zero", &adc_zero);
+    int has_kt  = find_key_num(line, "k_t", &k_t);
+    if (has_adc || has_kt) {
+      if (has_adc) g_ADC_zero = (float)adc_zero;
+      if (has_kt)  g_K_T      = (float)k_t;
+      if (EEPROM_SaveMDRCalibration(g_ADC_zero, g_K_T) == ESP_OK) {
+        UART_Printf("Saved MDR calib from host\r\n");
+      } else {
+        UART_Printf("Failed to save MDR calib to EEPROM\r\n");
+      }
+      UART_Printf("{\"ok\":true,\"cmd\":\"set_mdr_calib\",\"adc_zero\":%.3f,\"k_t\":%.9f}\r\n",
+                  g_ADC_zero, g_K_T);
+    } else {
+      reply_err("bad_args");
+    }
+    return;
+  }
+
   if (strcmp(cmd, "set_rtd_factor") == 0) {
     double dev = 0, factor = 0;
     if (find_key_num(line, "dev", &dev) && find_key_num(line, "factor", &factor)) {
